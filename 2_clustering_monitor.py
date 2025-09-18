@@ -9,7 +9,16 @@ import time
 from datetime import datetime
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+from dotenv import load_dotenv
+load_dotenv()
 from drain3 import TemplateMiner
+
+try:
+    from slack_integration import SlackNotifier
+    SLACK_AVAILABLE = True
+except ImportError:
+    SLACK_AVAILABLE = False
+    print("Slack 연동 모듈을 찾을 수 없습니다. 콘솔 출력만 진행합니다.")
 
 class LogClusteringHandler(FileSystemEventHandler):
     """실시간 로그 클러스터링 핸들러"""
@@ -32,6 +41,16 @@ class LogClusteringHandler(FileSystemEventHandler):
             print("✅ Drain3 엔진 초기화 완료")
         else:
             print("❌ Drain3 엔진 초기화 실패")
+
+        # Slack 연동 초기화 (맨 아래에 추가)
+        if SLACK_AVAILABLE:
+            self.slack_notifier = SlackNotifier()
+            if self.slack_notifier.enabled:
+                print("✅ Slack 연동 활성화됨")
+            else:
+                print("⚠️ Slack 비활성화 - 콘솔 출력만 진행")
+        else:
+            self.slack_notifier = None
     
     def initialize_drain3(self):
         """Drain3 초기화"""
@@ -111,6 +130,9 @@ class LogClusteringHandler(FileSystemEventHandler):
             # 결과 처리 (dict 또는 객체 모두 지원)
             cluster_id = self.get_cluster_id(result)
             template = self.get_template(result)
+
+            # 현재 클러스터 ID 저장 (Slack에서 사용)
+            self.current_cluster_id = cluster_id
             
             print(f"🏷️  클러스터 ID: {cluster_id}")
             print(f"📋 템플릿: {template}")
@@ -189,11 +211,11 @@ class LogClusteringHandler(FileSystemEventHandler):
             return {}
     
     def alert_frequent_error(self, template, count):
-        """빈발 에러 알림"""
+        """빈발 에러 알림 (Slack 연동 포함)"""
         print(f"🔥 긴급! 반복 에러 패턴: {template}")
         print(f"📈 발생 횟수: {count}번")
         
-        # 간단한 패턴 분석
+        # 기존 패턴 분석
         template_str = str(template).lower()
         if 'nullpointer' in template_str:
             print(f"🎯 권장사항: 널체크 코드 추가 필요")
@@ -204,7 +226,14 @@ class LogClusteringHandler(FileSystemEventHandler):
         elif 'filenotfound' in template_str:
             print(f"🎯 권장사항: 파일 경로 및 권한 확인")
         
-        print(f"💡 TODO: 여기서 Slack 알림 + RAG 해결책 검색")
+        # Slack 알림 추가
+        if self.slack_notifier:
+            # 현재 처리 중인 클러스터 ID 가져오기 (기존 로직에서)
+            # handle_error_clustering에서 cluster_id를 저장했다고 가정
+            cluster_id = getattr(self, 'current_cluster_id', 0)
+            self.slack_notifier.send_error_alert(template, count, cluster_id)
+        
+        print(f"💡 TODO: RAG 시스템으로 해결책 검색")
     
     def print_summary(self):
         """현황 요약 출력 (수정 완료)"""
@@ -299,8 +328,16 @@ def start_monitoring():
     
     try:
         while True:
-            time.sleep(10)  # 10초마다
-            handler.print_summary()  # 요약 출력
+            time.sleep(1)  # 10초 → 1초로 변경 (더 반응성 좋게)
+            # 10초마다 요약 출력하려면 카운터 사용
+            if hasattr(handler, 'summary_counter'):
+                handler.summary_counter += 1
+            else:
+                handler.summary_counter = 1
+            
+            if handler.summary_counter >= 10:  # 10초마다
+                handler.print_summary()
+                handler.summary_counter = 0
             
     except KeyboardInterrupt:
         print(f"\n⏹️  모니터링 중단")
