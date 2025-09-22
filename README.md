@@ -8,6 +8,7 @@ Drain3를 이용한 실시간 로그 클러스터링 및 모니터링 시스템
 - **지능형 클러스터링**: Drain3 알고리즘으로 에러 패턴 자동 분류
 - **빈발 패턴 감지**: 반복되는 에러 패턴 자동 탐지 (3회 이상 발생시 알림)
 - **Slack 연동**: 빈발 에러 패턴을 Slack 채널로 실시간 알림
+- **웹 대시보드**: 브라우저에서 실시간 모니터링 및 시각화
 - **패턴별 권장사항**: NPE, DB 연결, 메모리 부족 등 에러 유형별 맞춤 조치사항 제공
 
 ## 요구사항
@@ -54,11 +55,13 @@ SLACK_WEBHOOK_URL=https://hooks.slack.com/services/YOUR/WEBHOOK/URL
 python main.py --mode test      # Drain3 개념 학습
 python main.py --mode monitor   # 실시간 모니터링 시작
 python main.py --mode generate  # 테스트 로그 생성 (다른 터미널에서)
+python main.py --mode dashboard # 웹 대시보드 실행 (브라우저에서 모니터링)
 
 # 직접 실행 방법 (개발/학습용)
 python 1_basic_drain3_test.py   # Drain3 기본 학습
 python 2_clustering_monitor.py  # 실시간 모니터링
 python 3_log_generator.py       # 테스트 로그 생성
+python web_dashboard.py         # 웹 대시보드 직접 실행
 ```
 
 ## 사용법
@@ -68,6 +71,12 @@ python 3_log_generator.py       # 테스트 로그 생성
 2. **실시간 모니터링**: `python main.py --mode monitor` 실행
 3. **로그 생성**: 다른 터미널에서 `python main.py --mode generate` 실행
 4. **Slack 알림 확인**: 빈발 패턴 감지시 Slack 채널에서 알림 수신
+
+### 웹 대시보드 사용법
+1. **대시보드 실행**: `python main.py --mode dashboard` 실행
+2. **브라우저 접속**: http://localhost:5000 접속
+3. **로그 생성**: 다른 터미널에서 `python main.py --mode generate` 실행
+4. **실시간 모니터링**: 브라우저에서 실시간으로 로그와 클러스터링 결과 확인
 
 ### 모니터링 결과 해석
 - **클러스터 ID**: 각 에러 패턴의 고유 식별자
@@ -88,6 +97,7 @@ log-monitoring-system/
 ├── 2_clustering_monitor.py        # 실시간 로그 모니터링 (메인 기능)
 ├── 3_log_generator.py             # 테스트용 로그 생성기
 ├── slack_integration.py           # Slack 알림 연동 모듈
+├── web_dashboard.py               # 웹 대시보드 (Flask 기반)
 ├── main.py                        # 통합 실행 진입점
 ├── setup.py                       # 프로젝트 자동 설정 스크립트
 ├── requirements.txt               # Python 패키지 의존성

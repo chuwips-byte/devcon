@@ -34,6 +34,7 @@ def main():
   python main.py --mode test      # Drain3 개념 학습
   python main.py --mode monitor   # 실시간 모니터링 (메인 기능)
   python main.py --mode generate  # 테스트 로그 생성
+  python main.py --mode dashboard # 웹 대시보드 실행
   
 직접 실행 (기존 방식):
   python 1_basic_drain3_test.py
@@ -44,7 +45,7 @@ def main():
     
     parser.add_argument(
         '--mode', 
-        choices=['test', 'monitor', 'generate'], 
+        choices=['test', 'monitor', 'generate', 'dashboard'], 
         default='monitor',
         help='실행 모드 선택 (기본: monitor)'
     )
@@ -70,6 +71,10 @@ def main():
         'generate': {
             'file': '3_log_generator.py',
             'description': '테스트용 로그 생성기'
+        },
+        'dashboard': {
+            'file': 'web_dashboard.py',
+            'description': '웹 대시보드 (브라우저에서 모니터링)'
         }
     }
     

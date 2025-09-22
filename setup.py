@@ -51,7 +51,8 @@ def setup_project():
                 dst.write(src.read())
     
     print("설정 완료!")
-    print(f"가상환경 활성화: {'venv\\Scripts\\activate' if os.name == 'nt' else 'source venv/bin/activate'}")
+    venv_activate = 'venv\\Scripts\\activate' if os.name == 'nt' else 'source venv/bin/activate'
+    print(f"가상환경 활성화: {venv_activate}")
     print("실행: python src/main.py")
 
 if __name__ == "__main__":
