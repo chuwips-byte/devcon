@@ -1,6 +1,6 @@
 """
 파일명: 2_clustering_monitor.py
-목적: Watchdog + Drain3를 이용한 실시간 로그 모니터링 (들여쓰기 수정)
+목적: Watchdog + Drain3를 이용한 실시간 로그 모니터링 (Jira/Confluence 연동 추가)
 사용법: python 2_clustering_monitor.py
 """
 
@@ -10,6 +10,9 @@ from datetime import datetime
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from dotenv import load_dotenv
+from rag.vector_store import search_similar_error
+from rag.embedder import embed
+
 load_dotenv()
 from drain3 import TemplateMiner
 
@@ -36,13 +39,19 @@ class LogClusteringHandler(FileSystemEventHandler):
         # 통계 변수
         self.total_logs = 0
         self.error_logs = 0
-        
+
+        # 🔹 필수 속성들 (빠지면 AttributeError 발생함)
+        self._cluster_samples = {}          # 클러스터별 샘플 라인 저장
+        self.alert_min_count = int(os.getenv("ALERT_MIN_COUNT", "1"))  # 최소 알림 건수
+        self.alert_cooldown = int(os.getenv("ALERT_COOLDOWN_SEC", "600"))  # 알림 쿨다운(초)
+        self._last_alert_ts = {}            # cluster_id -> 마지막 알림 시각(epoch)
+
         if self.template_miner:
             print("✅ Drain3 엔진 초기화 완료")
         else:
             print("❌ Drain3 엔진 초기화 실패")
 
-        # Slack 연동 초기화 (맨 아래에 추가)
+        # Slack 연동 초기화
         if SLACK_AVAILABLE:
             self.slack_notifier = SlackNotifier()
             if self.slack_notifier.enabled:
@@ -51,7 +60,7 @@ class LogClusteringHandler(FileSystemEventHandler):
                 print("⚠️ Slack 비활성화 - 콘솔 출력만 진행")
         else:
             self.slack_notifier = None
-    
+
     def initialize_drain3(self):
         """Drain3 초기화"""
         try:
@@ -131,8 +140,8 @@ class LogClusteringHandler(FileSystemEventHandler):
             cluster_id = self.get_cluster_id(result)
             template = self.get_template(result)
 
-            # 현재 클러스터 ID 저장 (Slack에서 사용)
-            self.current_cluster_id = cluster_id
+            # 최근 샘플 라인 보관
+            self._cluster_samples[str(cluster_id)] = error_line
             
             print(f"🏷️  클러스터 ID: {cluster_id}")
             print(f"📋 템플릿: {template}")
@@ -142,10 +151,16 @@ class LogClusteringHandler(FileSystemEventHandler):
             if cluster_size > 0:
                 print(f"📊 발생 횟수: {cluster_size}번")
                 
-                # 빈발 패턴 감지
-                if cluster_size >= 3:
-                    print(f"⚠️  빈발 패턴 감지! {cluster_size}번 발생")
-                    self.alert_frequent_error(template, cluster_size)
+                # 빈발 패턴 감지(임계+쿨다운)
+                if cluster_size >= self.alert_min_count:
+                    now_sec = time.time()
+                    last = self._last_alert_ts.get(str(cluster_id), 0)
+                    if now_sec - last >= self.alert_cooldown:
+                        self._last_alert_ts[str(cluster_id)] = now_sec
+                        self.alert_frequent_error(template, cluster_size, cluster_id)
+                    else:
+                        remain = int(self.alert_cooldown - (now_sec - last))
+                        print(f"⏳ 알림 쿨다운 중({remain}s 남음) - cluster:{cluster_id}")
             else:
                 print(f"🔍 디버깅: 클러스터 {cluster_id} 크기가 0인 이유 조사")
                 clusters_dict = self.get_clusters_dict()
@@ -184,14 +199,12 @@ class LogClusteringHandler(FileSystemEventHandler):
     
     def get_clusters_dict(self):
         try:
-            # get_cluster_size()와 동일한 방법 사용
             if hasattr(self.template_miner, 'drain') and hasattr(self.template_miner.drain, 'id_to_cluster'):
                 id_to_cluster = self.template_miner.drain.id_to_cluster
                 if isinstance(id_to_cluster, dict):
                     print(f"   id_to_cluster 발견: {len(id_to_cluster)}개 클러스터")
                     return id_to_cluster
             
-            # 백업 방법: clusters를 순회하여 딕셔너리 재구성
             if hasattr(self.template_miner, 'drain') and hasattr(self.template_miner.drain, 'clusters'):
                 clusters_values = self.template_miner.drain.clusters
                 reconstructed = {}
@@ -210,12 +223,12 @@ class LogClusteringHandler(FileSystemEventHandler):
             print(f"   클러스터 딕셔너리 조회 오류: {e}")
             return {}
     
-    def alert_frequent_error(self, template, count):
-        """빈발 에러 알림 (Slack 연동 포함)"""
+    def alert_frequent_error(self, template, count, cluster_id):
+        """빈발 에러 알림 (Slack + Jira + RAG)"""
         print(f"🔥 긴급! 반복 에러 패턴: {template}")
         print(f"📈 발생 횟수: {count}번")
         
-        # 기존 패턴 분석
+        # 가이드
         template_str = str(template).lower()
         if 'nullpointer' in template_str:
             print(f"🎯 권장사항: 널체크 코드 추가 필요")
@@ -226,17 +239,21 @@ class LogClusteringHandler(FileSystemEventHandler):
         elif 'filenotfound' in template_str:
             print(f"🎯 권장사항: 파일 경로 및 권한 확인")
         
-        # Slack 알림 추가
+        # Slack 알림
         if self.slack_notifier:
-            # 현재 처리 중인 클러스터 ID 가져오기 (기존 로직에서)
-            # handle_error_clustering에서 cluster_id를 저장했다고 가정
-            cluster_id = getattr(self, 'current_cluster_id', 0)
-            self.slack_notifier.send_error_alert(template, count, cluster_id)
-        
+            try:
+                self.slack_notifier.send_error_alert(template, count, cluster_id)
+            except Exception as e:
+                print(f"Slack 알림 실패: {e}")
+
+        # 🔹 RAG 검색
         print(f"💡 TODO: RAG 시스템으로 해결책 검색")
-    
+        similar = search_similar_error(template, embed)
+        for match in similar:
+            print(f"🔎 유사 이슈: {match['text']} (출처: {match['issueKey']})")
+
     def print_summary(self):
-        """현황 요약 출력 (수정 완료)"""
+        """현황 요약 출력"""
         if not self.template_miner:
             print("❌ Drain3 엔진 미초기화로 요약 불가")
             return
@@ -246,28 +263,20 @@ class LogClusteringHandler(FileSystemEventHandler):
         print(f"📋 총 로그: {self.total_logs}개")
         print(f"🚨 에러 로그: {self.error_logs}개")
         
-        # 수정된 클러스터 조회
         clusters_dict = self.get_clusters_dict()
         print(f"🏷️  클러스터: {len(clusters_dict)}개")
         
         if clusters_dict:
             print(f"\n🏆 TOP 5 에러 패턴:")
-            
-            # 클러스터를 크기 순으로 정렬
             cluster_items = []
             for cluster_id, cluster in clusters_dict.items():
                 size = getattr(cluster, 'size', 0)
                 template = self.get_cluster_template(cluster)
                 cluster_items.append((cluster_id, template, size))
             
-            # 크기 순으로 정렬 (내림차순)
             sorted_clusters = sorted(cluster_items, key=lambda x: x[2], reverse=True)
-            
-            # 상위 5개 출력
             for i, (cid, template, size) in enumerate(sorted_clusters[:5], 1):
                 print(f"   {i}. [{size}번] {template}")
-                
-                # 심각도 표시
                 if size >= 50:
                     print(f"      🔴 매우 심각 - 즉시 조치 필요")
                 elif size >= 20:
@@ -279,16 +288,10 @@ class LogClusteringHandler(FileSystemEventHandler):
         else:
             print(f"   아직 에러 패턴이 발견되지 않았습니다.")
         
-        # 간단한 통계
         if self.total_logs > 0:
             error_rate = (self.error_logs / self.total_logs) * 100
             print(f"📊 에러율: {error_rate:.1f}%")
-            
-            if error_rate > 80:
-                print(f"⚠️  시스템 상태 위험! 에러율이 {error_rate:.1f}%입니다")
-            elif error_rate > 50:
-                print(f"⚠️  시스템 상태 주의! 에러율이 {error_rate:.1f}%입니다")
-    
+
     def get_cluster_template(self, cluster):
         """클러스터에서 템플릿 추출"""
         try:
@@ -301,19 +304,17 @@ class LogClusteringHandler(FileSystemEventHandler):
         except Exception:
             return "unknown"
 
+
 def start_monitoring():
     """모니터링 시작"""
     watch_dir = r"D:\devcon\logs"
-    
-    print("🚀 실시간 로그 모니터링 시작 (들여쓰기 수정 버전)")
+
+    print("🚀 실시간 로그 모니터링 시작 (Jira/Confluence 연동 버전)")
     print(f"📁 감시 디렉토리: {watch_dir}")
     
-    # 디렉토리 생성
     os.makedirs(watch_dir, exist_ok=True)
     
-    # 핸들러와 Observer 설정
     handler = LogClusteringHandler()
-    
     if not handler.template_miner:
         print("❌ Drain3 초기화 실패로 모니터링을 시작할 수 없습니다")
         return
@@ -328,8 +329,7 @@ def start_monitoring():
     
     try:
         while True:
-            time.sleep(1)  # 10초 → 1초로 변경 (더 반응성 좋게)
-            # 10초마다 요약 출력하려면 카운터 사용
+            time.sleep(1)
             if hasattr(handler, 'summary_counter'):
                 handler.summary_counter += 1
             else:
@@ -341,10 +341,11 @@ def start_monitoring():
             
     except KeyboardInterrupt:
         print(f"\n⏹️  모니터링 중단")
-        handler.print_summary()  # 최종 요약
+        handler.print_summary()
         observer.stop()
         observer.join()
         print("✅ 종료 완료")
+
 
 if __name__ == "__main__":
     start_monitoring()
