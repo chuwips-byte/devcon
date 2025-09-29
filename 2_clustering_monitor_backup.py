@@ -1,7 +1,7 @@
 """
-파일명: 2_clustering_monitor.py (로컬 저장 기능 포함 업데이트 버전)
-목적: Watchdog + Drain3를 이용한 실시간 로그 모니터링 + 로컬 저장
-사용법: python 2_clustering_monitor.py
+개선된 로그 클러스터링 시스템
+- 스택트레이스 멀티라인 처리 개선
+- 2_clustering_monitor.py 통합 개선안
 """
 
 import os
@@ -13,15 +13,14 @@ from dotenv import load_dotenv
 load_dotenv()
 from drain3 import TemplateMiner
 
-# Slack 연동 모듈 시도
+# Optional imports
 try:
     from slack_integration import SlackNotifier
     SLACK_AVAILABLE = True
 except ImportError:
     SLACK_AVAILABLE = False
     print("Slack 연동 모듈을 찾을 수 없습니다. 콘솔 출력만 진행합니다.")
-    
-# 스택트레이스 프로세서 시도
+
 try:
     from stack_trace_processor import EnhancedStackTraceProcessor
     STACK_PROCESSOR_AVAILABLE = True
@@ -29,16 +28,9 @@ except ImportError:
     STACK_PROCESSOR_AVAILABLE = False
     print("스택트레이스 프로세서를 찾을 수 없습니다. 기본 처리만 진행합니다.")
 
-# 로컬 저장 모듈 시도
-try:
-    from log_block_saver import LogBlockSaver
-    LOG_SAVER_AVAILABLE = True
-except ImportError:
-    LOG_SAVER_AVAILABLE = False
-    print("로그 블록 저장 모듈을 찾을 수 없습니다. 로컬 저장 기능 비활성화")
 
-class LogClusteringHandler(FileSystemEventHandler):
-    """실시간 로그 클러스터링 핸들러 (로컬 저장 기능 포함)"""
+class ImprovedLogClusteringHandler(FileSystemEventHandler):
+    """개선된 실시간 로그 클러스터링 핸들러"""
     
     def __init__(self):
         # 파일별 마지막 읽은 위치 저장
@@ -68,9 +60,6 @@ class LogClusteringHandler(FileSystemEventHandler):
         self.last_alert_time = {}
         self.alert_cooldown = timedelta(minutes=5)
         
-        # 클러스터별 원본 예시 보관용
-        self.error_examples = {}
-        
         if self.template_miner:
             print("✅ Drain3 엔진 초기화 완료")
         else:
@@ -92,14 +81,6 @@ class LogClusteringHandler(FileSystemEventHandler):
             print("✅ 스택트레이스 프로세서 활성화됨")
         else:
             self.stack_processor = None
-        
-        # 로그 블록 로컬 저장 기능 초기화
-        if LOG_SAVER_AVAILABLE:
-            self.log_saver = LogBlockSaver()
-            print("✅ 로그 블록 로컬 저장 기능 활성화됨")
-        else:
-            self.log_saver = None
-            print("⚠️ 로컬 저장 기능 비활성화")
     
     def initialize_drain3(self):
         """Drain3 초기화 (버전 호환성 개선)"""
@@ -182,7 +163,7 @@ class LogClusteringHandler(FileSystemEventHandler):
                 
                 print(f"   📄 새 라인: {len(new_lines)}개")
                 
-                # 각 라인을 처리
+                # 각 라인을 버퍼에 추가하여 멀티라인 처리
                 for line in new_lines:
                     line = line.strip()
                     if not line:
@@ -318,9 +299,6 @@ class LogClusteringHandler(FileSystemEventHandler):
             cluster_id = self.get_cluster_id(result)
             template = self.get_template(result)
             
-            # 원본 로그 예시 저장
-            self.store_original_example(cluster_id, original or log_content)
-            
             print(f"🏷️  클러스터 ID: {cluster_id}")
             print(f"📋 템플릿: {template}")
             
@@ -332,9 +310,7 @@ class LogClusteringHandler(FileSystemEventHandler):
                 # 빈발 패턴 감지 (중복 알림 방지 포함)
                 if cluster_size >= 3 and self.should_send_alert(cluster_id):
                     print(f"⚠️  빈발 패턴 감지! {cluster_size}번 발생")
-                    # 향상된 알림 전송 (예시 포함)
-                    examples = self.get_examples_for_cluster(cluster_id)
-                    self.alert_frequent_error(template, cluster_size, cluster_id, examples)
+                    self.alert_frequent_error(template, cluster_size, cluster_id)
                     self.last_alert_time[cluster_id] = datetime.now()
                     
         except Exception as e:
@@ -385,26 +361,8 @@ class LogClusteringHandler(FileSystemEventHandler):
             print(f"   클러스터 딕셔너리 조회 오류: {e}")
             return {}
     
-    def store_original_example(self, cluster_id, original_text):
-        """클러스터별 원본 예시 저장"""
-        if cluster_id not in self.error_examples:
-            self.error_examples[cluster_id] = []
-        
-        # 최근 3개 예시만 보관 (메모리 절약)
-        if len(self.error_examples[cluster_id]) >= 3:
-            self.error_examples[cluster_id].pop(0)
-        
-        self.error_examples[cluster_id].append({
-            'text': original_text,
-            'timestamp': datetime.now()
-        })
-    
-    def get_examples_for_cluster(self, cluster_id):
-        """특정 클러스터의 예시들 반환"""
-        return self.error_examples.get(cluster_id, [])
-    
-    def alert_frequent_error(self, template, count, cluster_id, examples=None):
-        """빈발 에러 알림 (로컬 저장 + Slack)"""
+    def alert_frequent_error(self, template, count, cluster_id):
+        """빈발 에러 알림 (개선된 버전)"""
         print(f"🔥 긴급! 반복 에러 패턴: {template}")
         print(f"📈 발생 횟수: {count}번")
         
@@ -413,46 +371,9 @@ class LogClusteringHandler(FileSystemEventHandler):
         for rec in recommendations:
             print(f"🎯 권장사항: {rec}")
         
-        # 예시 데이터 확인
-        if not examples:
-            examples = self.get_examples_for_cluster(cluster_id)
-        
-        print(f"🔍 디버깅 - 클러스터 {cluster_id} 예시 개수: {len(examples) if examples else 0}")
-        
-        # 1순위: 로컬 저장
-        if self.log_saver:
-            try:
-                filepath = self.log_saver.save_error_alert(cluster_id, template, count, examples)
-                print(f"✅ 로컬 저장 완료: {filepath}")
-                
-                # 원본 로그도 별도 저장
-                if examples:
-                    raw_logs = [ex.get('text', str(ex)) if isinstance(ex, dict) else str(ex) for ex in examples]
-                    self.log_saver.save_raw_log_cluster(cluster_id, raw_logs)
-                    
-            except Exception as e:
-                print(f"❌ 로컬 저장 오류: {e}")
-        
-        # 2순위: Slack 전송
+        # Slack 알림
         if self.slack_notifier:
-            try:
-                # 향상된 Slack 연동인지 확인
-                if hasattr(self.slack_notifier, 'send_error_alert') and examples:
-                    # 예시 포함해서 전송
-                    success = self.slack_notifier.send_error_alert(template, count, cluster_id, examples)
-                    if success:
-                        print("✅ Slack 알림 전송 성공")
-                    else:
-                        print("❌ Slack 알림 전송 실패")
-                else:
-                    # 기본 방식으로 전송
-                    self.slack_notifier.send_error_alert(template, count, cluster_id)
-                    print("ℹ️ 기본 Slack 알림 전송")
-                    
-            except Exception as e:
-                print(f"❌ Slack 전송 오류: {e}")
-        else:
-            print("⚠️ Slack 연동 비활성화")
+            self.slack_notifier.send_error_alert(template, count, cluster_id)
     
     def analyze_error_pattern(self, template_str):
         """에러 패턴 분석 및 권장사항 생성"""
@@ -461,7 +382,7 @@ class LogClusteringHandler(FileSystemEventHandler):
         
         if 'nullpointer' in template_lower:
             recommendations.append("널체크 코드 추가 필요")
-        if 'database' in template_lower or 'sql' in template_lower:
+        if 'database' in template_lower or 'connection' in template_lower:
             recommendations.append("DB 커넥션 풀 상태 확인")
         if 'outofmemory' in template_lower:
             recommendations.append("메모리 사용량 및 힙 크기 확인")
@@ -476,7 +397,7 @@ class LogClusteringHandler(FileSystemEventHandler):
         return recommendations
     
     def print_summary(self):
-        """현황 요약 출력 (로컬 저장 포함)"""
+        """현황 요약 출력 (개선된 버전)"""
         if not self.template_miner:
             print("❌ Drain3 엔진 미초기화로 요약 불가")
             return
@@ -491,7 +412,6 @@ class LogClusteringHandler(FileSystemEventHandler):
         clusters_dict = self.get_clusters_dict()
         print(f"📊 클러스터 수: {len(clusters_dict)}개")
         
-        top_clusters = []
         if clusters_dict:
             print(f"\n🏆 TOP 5 에러 패턴:")
             
@@ -505,11 +425,10 @@ class LogClusteringHandler(FileSystemEventHandler):
             # 크기 순으로 정렬
             sorted_clusters = sorted(cluster_items, key=lambda x: x[2], reverse=True)
             
-            # 상위 5개 출력 및 저장
+            # 상위 5개 출력
             for i, (cid, template, size) in enumerate(sorted_clusters[:5], 1):
                 severity = self.get_severity_indicator(size)
                 print(f"   {i}. [{size}번] {severity} {template}")
-                top_clusters.append((cid, template, size))
         
         # 통계
         if self.total_logs > 0:
@@ -524,41 +443,6 @@ class LogClusteringHandler(FileSystemEventHandler):
                 print(f"🚨 시스템 상태 위험! 에러율이 {error_rate:.1f}%입니다")
             elif error_rate > 50:
                 print(f"⚠️  시스템 상태 주의! 에러율이 {error_rate:.1f}%입니다")
-        
-        # 10분마다 요약 저장
-        current_time = datetime.now()
-        if (not hasattr(self, 'last_summary_saved') or 
-            (current_time - self.last_summary_saved).total_seconds() >= 600):  # 10분
-            
-            if len(top_clusters) > 0:
-                handler_stats = {
-                    'total_logs': self.total_logs,
-                    'error_logs': self.error_logs,
-                    'clustered_logs': self.clustered_logs,
-                    'top_clusters': top_clusters
-                }
-                
-                # 로컬 저장
-                if self.log_saver:
-                    try:
-                        filepath = self.log_saver.save_summary_report(handler_stats)
-                        print(f"✅ 로컬 요약 저장 완료: {filepath}")
-                    except Exception as e:
-                        print(f"❌ 로컬 요약 저장 오류: {e}")
-                
-                # Slack 전송 (향상된 버전이 있다면)
-                if (self.slack_notifier and hasattr(self.slack_notifier, 'send_clustering_summary')):
-                    try:
-                        self.slack_notifier.send_clustering_summary(handler_stats)
-                        print("📤 Slack 요약 정보 전송됨")
-                    except Exception as e:
-                        print(f"❌ Slack 요약 전송 오류: {e}")
-                
-                self.last_summary_saved = current_time
-        
-        # 로컬 리포트 요약 출력
-        if self.log_saver:
-            self.log_saver.print_report_summary()
     
     def get_severity_indicator(self, count):
         """심각도 표시기 반환"""
@@ -583,24 +467,24 @@ class LogClusteringHandler(FileSystemEventHandler):
         except Exception:
             return "unknown"
 
-def start_monitoring():
-    """모니터링 시작 (로컬 저장 기능 포함)"""
+
+def start_improved_monitoring():
+    """개선된 모니터링 시작"""
     watch_dir = r"D:\devcon\logs"
     
-    print("🚀 실시간 로그 모니터링 시작 (로컬 저장 기능 포함)")
+    print("🚀 개선된 실시간 로그 모니터링 시작")
     print(f"📁 감시 디렉토리: {watch_dir}")
-    print("✨ 기능:")
+    print("✨ 새로운 기능:")
     print("   - 멀티라인 스택트레이스 지원")
     print("   - 중복 알림 방지 (5분 쿨다운)")
     print("   - 향상된 에러 패턴 분석")
-    print("   - 로컬 HTML/JSON 리포트 자동 생성")
-    print("   - Slack 연동 (설정된 경우)")
+    print("   - 더 정확한 클러스터링")
     
     # 디렉토리 생성
     os.makedirs(watch_dir, exist_ok=True)
     
     # 핸들러와 Observer 설정
-    handler = LogClusteringHandler()
+    handler = ImprovedLogClusteringHandler()
     
     if not handler.template_miner:
         print("❌ Drain3 초기화 실패로 모니터링을 시작할 수 없습니다")
@@ -615,17 +499,15 @@ def start_monitoring():
     print("🛑 Ctrl+C로 종료")
     
     try:
+        summary_counter = 0
         while True:
             time.sleep(1)
-            # 10초마다 요약 출력하려면 카운터 사용
-            if hasattr(handler, 'summary_counter'):
-                handler.summary_counter += 1
-            else:
-                handler.summary_counter = 1
+            summary_counter += 1
             
-            if handler.summary_counter >= 10:  # 10초마다
+            # 10초마다 요약 출력
+            if summary_counter >= 10:
                 handler.print_summary()
-                handler.summary_counter = 0
+                summary_counter = 0
             
     except KeyboardInterrupt:
         print(f"\n⏹️  모니터링 중단")
@@ -634,5 +516,6 @@ def start_monitoring():
         observer.join()
         print("✅ 종료 완료")
 
+
 if __name__ == "__main__":
-    start_monitoring()
+    start_improved_monitoring()
