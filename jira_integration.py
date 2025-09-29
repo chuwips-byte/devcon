@@ -11,8 +11,7 @@ load_dotenv()
 JIRA_URL = os.getenv("JIRA_URL")
 USERNAME = os.getenv("JIRA_USERNAME")
 PASSWORD = os.getenv("JIRA_PASSWORD")
-PROJECT_KEY = os.getenv("JIRA_PROJECT_KEY", "")  # 비워두면 전체 검색
-MAX_RESULTS = int(os.getenv("MAX_RESULTS", "10"))
+PROJECT_KEY = os.getenv("JIRA_PROJECT_KEY")
 
 # JQL: 프로젝트 키 있으면 프로젝트 단위, 없으면 전체
 if PROJECT_KEY:
@@ -20,7 +19,7 @@ if PROJECT_KEY:
 else:
     JQL = 'issuetype = Bug ORDER BY created DESC'
 
-def fetch_bug_issues(max_results=MAX_RESULTS):
+def fetch_bug_issues(max_results):
     url = f"{JIRA_URL}/rest/api/2/search"
     params = {"jql": JQL, "maxResults": max_results}
     res = requests.get(url, auth=HTTPBasicAuth(USERNAME, PASSWORD), params=params)

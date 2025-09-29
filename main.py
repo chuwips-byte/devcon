@@ -1,102 +1,82 @@
-#!/usr/bin/env python3
 """
-Log Monitoring System - Unified Entry Point
-기존 스크립트들에 대한 통합 실행 진입점
+파일명: main.py
+목적: 통합 실행 진입점 - 모든 기능을 하나의 명령으로 실행
+사용법:
+  - python main.py --mode dashboard  # 통합 웹 대시보드 (메인)
+  - python main.py --mode monitor    # 터미널 모니터링
+  - python main.py --mode generate   # 테스트 로그 생성
+  - python main.py --mode test       # Drain3 학습
 """
 
 import argparse
-import subprocess
 import sys
 import os
-from pathlib import Path
-
-def run_script(script_name, description):
-    """스크립트 실행"""
-    print(f"🚀 {description} 시작")
-    print("=" * 50)
-    
-    try:
-        result = subprocess.run([sys.executable, script_name], check=True)
-        return result.returncode
-    except subprocess.CalledProcessError as e:
-        print(f"❌ 실행 실패: {e}")
-        return e.returncode
-    except KeyboardInterrupt:
-        print("\n⏹️ 사용자에 의해 중단됨")
-        return 1
 
 def main():
-    parser = argparse.ArgumentParser(
-        description='Log Monitoring System - 실시간 로그 클러스터링 및 모니터링',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-사용 예시:
-  python main.py --mode test      # Drain3 개념 학습
-  python main.py --mode monitor   # 실시간 모니터링 (메인 기능)
-  python main.py --mode generate  # 테스트 로그 생성
-  python main.py --mode dashboard # 웹 대시보드 실행
-  
-직접 실행 (기존 방식):
-  python 1_basic_drain3_test.py
-  python 2_clustering_monitor.py  
-  python 3_log_generator.py
-        """
-    )
-    
-    parser.add_argument(
-        '--mode', 
-        choices=['test', 'monitor', 'generate', 'dashboard'], 
-        default='monitor',
-        help='실행 모드 선택 (기본: monitor)'
-    )
-    
-    parser.add_argument(
-        '--list', 
-        action='store_true',
-        help='사용 가능한 스크립트 목록 출력'
-    )
-    
+    parser = argparse.ArgumentParser(description='통합 로그 모니터링 시스템')
+    parser.add_argument('--mode', choices=['dashboard', 'test', 'monitor', 'generate', 'jira', 'ssh', 'rag'],
+                        required=True, help='실행 모드 선택')
+
     args = parser.parse_args()
-    
-    # 스크립트 정보
-    scripts = {
-        'test': {
-            'file': '1_basic_drain3_test.py',
-            'description': 'Drain3 기본 학습 및 테스트'
-        },
-        'monitor': {
-            'file': '2_clustering_monitor.py', 
-            'description': '실시간 로그 모니터링 (메인 기능)'
-        },
-        'generate': {
-            'file': '3_log_generator.py',
-            'description': '테스트용 로그 생성기'
-        },
-        'dashboard': {
-            'file': 'web_dashboard.py',
-            'description': '웹 대시보드 (브라우저에서 모니터링)'
-        }
-    }
-    
-    # 목록 출력
-    if args.list:
-        print("📋 사용 가능한 스크립트:")
-        for mode, info in scripts.items():
-            print(f"  {mode:8s} - {info['description']}")
-            print(f"           ({info['file']})")
-        return 0
-    
-    # 파일 존재 확인
-    script_info = scripts[args.mode]
-    script_file = script_info['file']
-    
-    if not os.path.exists(script_file):
-        print(f"❌ 스크립트 파일이 없습니다: {script_file}")
-        return 1
-    
-    # 스크립트 실행
-    return run_script(script_file, script_info['description'])
+
+    if args.mode == 'dashboard':
+        # 메인 통합 대시보드 (web_dashboard.py) - 포트 5000
+        print("🌐 통합 웹 대시보드를 시작합니다...")
+        print("=" * 50)
+        print("📱 브라우저에서 http://localhost:5000 접속하세요")
+        print("🎛️ 왼쪽 메뉴: 로그 모니터링, RAG 학습, SSH 연결, 시스템 정보")
+        print("=" * 50)
+        try:
+            import subprocess
+            subprocess.run([sys.executable, 'web_dashboard.py'])
+        except Exception as e:
+            print(f"❌ 웹 대시보드 실행 실패: {e}")
+
+    elif args.mode == 'test':
+        # Drain3 학습 및 테스트
+        print("🎓 Drain3 학습을 시작합니다...")
+        try:
+            import subprocess
+            subprocess.run([sys.executable, '1_basic_drain3_test.py'])
+        except Exception as e:
+            print(f"❌ Drain3 테스트 실행 실패: {e}")
+
+    elif args.mode == 'monitor':
+        # 실시간 모니터링
+        print("👀 실시간 로그 모니터링을 시작합니다...")
+        try:
+            import subprocess
+            subprocess.run([sys.executable, '2_clustering_monitor.py'])
+        except Exception as e:
+            print(f"❌ 클러스터링 모니터 실행 실패: {e}")
+
+    elif args.mode == 'generate':
+        # 테스트 로그 생성
+        print("📝 테스트 로그 생성을 시작합니다...")
+        try:
+            import subprocess
+            subprocess.run([sys.executable, '3_log_generator.py'])
+        except Exception as e:
+            print(f"❌ 로그 생성기 실행 실패: {e}")
+
+    elif args.mode == 'jira':
+        # JIRA 연동 직접 실행
+        print("🎫 JIRA 연동을 실행합니다...")
+        try:
+            import subprocess
+            subprocess.run([sys.executable, 'jira_integration.py'])
+        except Exception as e:
+            print(f"❌ JIRA 연동 실행 실패: {e}")
+
+    elif args.mode == 'ssh':
+        # SSH 테스트 직접 실행
+        print("🔑 SSH 연결 테스트...")
+        print("SSH 기능은 통합 대시보드에서 사용하세요: python main.py --mode dashboard")
+
+    elif args.mode == 'rag':
+        # RAG 학습 직접 실행
+        print("🧠 RAG 학습...")
+        print("RAG 학습은 통합 대시보드에서 사용하세요: python main.py --mode dashboard")
 
 if __name__ == "__main__":
-    exit_code = main()
-    sys.exit(exit_code)
+    main()
