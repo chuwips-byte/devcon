@@ -31,10 +31,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 사용 예시:
-  python main.py --mode test      # Drain3 개념 학습
-  python main.py --mode monitor   # 실시간 모니터링 (메인 기능)
-  python main.py --mode generate  # 테스트 로그 생성
-  python main.py --mode dashboard # 웹 대시보드 실행
+  python main.py --mode test        # Drain3 개념 학습
+  python main.py --mode monitor     # 실시간 모니터링 시작
+  python main.py --mode generate    # 테스트 로그 생성
+  python main.py --mode dashboard   # 웹 대시보드 실행
+  python main.py --mode ollama-test # Ollama AI 분석기 테스트
   
 직접 실행 (기존 방식):
   python 1_basic_drain3_test.py
@@ -45,7 +46,7 @@ def main():
     
     parser.add_argument(
         '--mode', 
-        choices=['test', 'monitor', 'generate', 'dashboard'], 
+        choices=['test', 'monitor', 'generate', 'dashboard', 'ollama-test'], 
         default='monitor',
         help='실행 모드 선택 (기본: monitor)'
     )
@@ -75,6 +76,10 @@ def main():
         'dashboard': {
             'file': 'web_dashboard.py',
             'description': '웹 대시보드 (브라우저에서 모니터링)'
+        },
+        'ollama-test': {
+            'file': 'ollama_integration.py',
+            'description': 'Ollama AI 분석기 테스트'
         }
     }
     

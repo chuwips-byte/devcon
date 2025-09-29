@@ -7,7 +7,7 @@ import requests
 import json
 import os
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict
 from dotenv import load_dotenv
 load_dotenv()  # .env 파일 로드
 
@@ -59,8 +59,203 @@ class SlackNotifier:
             print(f"Slack 연결 오류: {e}")
             return False
     
+    def send_error_alert_with_ai(self, template: str, count: int, cluster_id: int, ai_analysis: Optional[Dict] = None) -> bool:
+        """AI 분석 결과를 포함한 빈발 에러 알림 전송"""
+        
+        # 심각도 결정
+        if count >= 50:
+            severity = "매우 심각"
+            color = "danger"
+            emoji = "🔴"
+        elif count >= 20:
+            severity = "심각"
+            color = "warning"
+            emoji = "🟠"
+        elif count >= 10:
+            severity = "주의"
+            color = "warning"
+            emoji = "🟡"
+        else:
+            severity = "경미"
+            color = "good"
+            emoji = "🟢"
+        
+        # AI 분석 결과가 있는 경우
+        if ai_analysis:
+            # AI 분석 기반 권장사항
+            recommendations = self._format_ai_recommendations(ai_analysis)
+            
+            # 콘솔 출력 (항상 실행)
+            self._print_console_alert_with_ai(template, count, severity, ai_analysis)
+            
+            # Slack 전송 (활성화된 경우만)
+            if not self.enabled:
+                return True
+            
+            message = {
+                "text": f"{emoji} AI 분석된 빈발 에러 패턴 감지 - {severity}",
+                "attachments": [
+                    {
+                        "color": color,
+                        "fields": [
+                            {
+                                "title": "에러 패턴",
+                                "value": f"```{template}```",
+                                "short": False
+                            },
+                            {
+                                "title": "발생 횟수",
+                                "value": f"{count}번",
+                                "short": True
+                            },
+                            {
+                                "title": "클러스터 ID",
+                                "value": str(cluster_id),
+                                "short": True
+                            },
+                            {
+                                "title": "AI 분석 심각도",
+                                "value": f"{ai_analysis.get('severity', 'Unknown')}",
+                                "short": True
+                            },
+                            {
+                                "title": "AI 신뢰도",
+                                "value": f"{ai_analysis.get('confidence', 0)}%",
+                                "short": True
+                            },
+                            {
+                                "title": "근본 원인 (AI 분석)",
+                                "value": ai_analysis.get('root_cause', '분석 불가'),
+                                "short": False
+                            },
+                            {
+                                "title": "즉시 조치사항 (AI 권장)",
+                                "value": recommendations['immediate'],
+                                "short": False
+                            },
+                            {
+                                "title": "장기적 해결방안 (AI 권장)",
+                                "value": recommendations['long_term'],
+                                "short": False
+                            },
+                            {
+                                "title": "예방 방법 (AI 권장)",
+                                "value": recommendations['prevention'],
+                                "short": False
+                            },
+                            {
+                                "title": "감지 시간",
+                                "value": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "short": True
+                            }
+                        ],
+                        "footer": f"Log Monitoring System + AI Analysis ({ai_analysis.get('model_used', 'Unknown')})",
+                        "ts": int(datetime.now().timestamp())
+                    }
+                ]
+            }
+        else:
+            # 기존 방식 (AI 분석 없음)
+            recommendations = self._get_recommendations(template)
+            
+            # 콘솔 출력 (항상 실행)
+            self._print_console_alert(template, count, severity, recommendations)
+            
+            # Slack 전송 (활성화된 경우만)
+            if not self.enabled:
+                return True
+            
+            message = {
+                "text": f"{emoji} 빈발 에러 패턴 감지 - {severity}",
+                "attachments": [
+                    {
+                        "color": color,
+                        "fields": [
+                            {
+                                "title": "에러 패턴",
+                                "value": f"```{template}```",
+                                "short": False
+                            },
+                            {
+                                "title": "발생 횟수",
+                                "value": f"{count}번",
+                                "short": True
+                            },
+                            {
+                                "title": "클러스터 ID",
+                                "value": str(cluster_id),
+                                "short": True
+                            },
+                            {
+                                "title": "심각도",
+                                "value": f"{emoji} {severity}",
+                                "short": True
+                            },
+                            {
+                                "title": "감지 시간",
+                                "value": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "short": True
+                            },
+                            {
+                                "title": "권장 조치사항",
+                                "value": recommendations,
+                                "short": False
+                            }
+                        ],
+                        "footer": "Log Monitoring System",
+                        "ts": int(datetime.now().timestamp())
+                    }
+                ]
+            }
+        
+        try:
+            response = requests.post(self.webhook_url, json=message, timeout=10)
+            if response.status_code == 200:
+                print("Slack 알림 전송 성공")
+                return True
+            else:
+                print(f"Slack 알림 전송 실패: HTTP {response.status_code}")
+                return False
+        except Exception as e:
+            print(f"Slack 전송 오류: {e}")
+            return False
+    
+    def _format_ai_recommendations(self, ai_analysis: Dict) -> Dict[str, str]:
+        """AI 분석 결과를 Slack 메시지 형식으로 포맷팅"""
+        immediate = "\n".join([f"• {action}" for action in ai_analysis.get('immediate_actions', [])])
+        long_term = "\n".join([f"• {solution}" for solution in ai_analysis.get('long_term_solutions', [])])
+        prevention = "\n".join([f"• {tip}" for tip in ai_analysis.get('prevention_tips', [])])
+        
+        return {
+            'immediate': immediate,
+            'long_term': long_term,
+            'prevention': prevention
+        }
+    
+    def _print_console_alert_with_ai(self, template: str, count: int, severity: str, ai_analysis: Dict):
+        """AI 분석 결과를 포함한 콘솔 알림 출력"""
+        print("\n" + "="*80)
+        print(f"SLACK 알림 (AI 분석 포함) - {severity}")
+        print("="*80)
+        print(f"패턴: {template}")
+        print(f"횟수: {count}번")
+        print(f"AI 에러 유형: {ai_analysis.get('error_type', 'Unknown')}")
+        print(f"AI 심각도: {ai_analysis.get('severity', 'Unknown')}")
+        print(f"AI 신뢰도: {ai_analysis.get('confidence', 0)}%")
+        print(f"근본 원인: {ai_analysis.get('root_cause', '분석 불가')}")
+        print(f"AI 권장 즉시 조치사항:")
+        for action in ai_analysis.get('immediate_actions', []):
+            print(f"  • {action}")
+        print(f"AI 권장 장기적 해결방안:")
+        for solution in ai_analysis.get('long_term_solutions', []):
+            print(f"  • {solution}")
+        print(f"AI 권장 예방 방법:")
+        for tip in ai_analysis.get('prevention_tips', []):
+            print(f"  • {tip}")
+        print("="*80)
+    
     def send_error_alert(self, template: str, count: int, cluster_id: int) -> bool:
-        """빈발 에러 알림 전송"""
+        """빈발 에러 알림 전송 (기존 방식)"""
         
         # 심각도 결정
         if count >= 50:

@@ -20,6 +20,13 @@ except ImportError:
     SLACK_AVAILABLE = False
     print("Slack 연동 모듈을 찾을 수 없습니다. 콘솔 출력만 진행합니다.")
 
+try:
+    from ollama_integration import OllamaErrorAnalyzer
+    OLLAMA_AVAILABLE = True
+except ImportError:
+    OLLAMA_AVAILABLE = False
+    print("Ollama 연동 모듈을 찾을 수 없습니다. AI 분석 기능이 비활성화됩니다.")
+
 class LogClusteringHandler(FileSystemEventHandler):
     """실시간 로그 클러스터링 핸들러"""
     
@@ -51,6 +58,16 @@ class LogClusteringHandler(FileSystemEventHandler):
                 print("⚠️ Slack 비활성화 - 콘솔 출력만 진행")
         else:
             self.slack_notifier = None
+        
+        # Ollama AI 분석기 초기화
+        if OLLAMA_AVAILABLE:
+            self.ollama_analyzer = OllamaErrorAnalyzer()
+            if self.ollama_analyzer.enabled:
+                print("✅ Ollama AI 분석기 활성화됨")
+            else:
+                print("⚠️ Ollama 비활성화 - 기본 분석만 진행")
+        else:
+            self.ollama_analyzer = None
     
     def initialize_drain3(self):
         """Drain3 초기화"""
@@ -145,7 +162,7 @@ class LogClusteringHandler(FileSystemEventHandler):
                 # 빈발 패턴 감지
                 if cluster_size >= 3:
                     print(f"⚠️  빈발 패턴 감지! {cluster_size}번 발생")
-                    self.alert_frequent_error(template, cluster_size)
+                    self.alert_frequent_error(error_line, template, cluster_size, cluster_id)
             else:
                 print(f"🔍 디버깅: 클러스터 {cluster_id} 크기가 0인 이유 조사")
                 clusters_dict = self.get_clusters_dict()
@@ -210,28 +227,72 @@ class LogClusteringHandler(FileSystemEventHandler):
             print(f"   클러스터 딕셔너리 조회 오류: {e}")
             return {}
     
-    def alert_frequent_error(self, template, count):
-        """빈발 에러 알림 (Slack 연동 포함)"""
+    def alert_frequent_error(self, error_line, template, count, cluster_id):
+        """빈발 에러 알림 (AI 분석 포함)"""
         print(f"🔥 긴급! 반복 에러 패턴: {template}")
         print(f"📈 발생 횟수: {count}번")
         
-        # 기존 패턴 분석
-        template_str = str(template).lower()
-        if 'nullpointer' in template_str:
-            print(f"🎯 권장사항: 널체크 코드 추가 필요")
-        elif 'database' in template_str or 'connection' in template_str:
-            print(f"🎯 권장사항: DB 커넥션 풀 상태 확인")
-        elif 'outofmemory' in template_str:
-            print(f"🎯 권장사항: 메모리 사용량 및 힙 크기 확인")
-        elif 'filenotfound' in template_str:
-            print(f"🎯 권장사항: 파일 경로 및 권한 확인")
+        # AI 분석 수행
+        ai_analysis = None
+        if self.ollama_analyzer and self.ollama_analyzer.enabled:
+            analysis_start_time = datetime.now().strftime("%H:%M:%S")
+            print(f"🤖 AI 분석 시작... (시작시간: {analysis_start_time})")
+            try:
+                ai_analysis = self.ollama_analyzer.analyze_error(
+                    error_log=error_line,
+                    error_template=template,
+                    occurrence_count=count,
+                    context={
+                        "cluster_id": cluster_id,
+                        "detection_time": datetime.now().isoformat(),
+                        "total_logs": self.total_logs,
+                        "error_logs": self.error_logs
+                    }
+                )
+                
+                # AI 분석 결과 출력
+                print(f"\n🧠 AI 분석 결과:")
+                print(f"   에러 유형: {ai_analysis['error_type']}")
+                print(f"   심각도: {ai_analysis['severity']}")
+                print(f"   근본 원인: {ai_analysis['root_cause']}")
+                print(f"   신뢰도: {ai_analysis['confidence']}%")
+                
+                print(f"\n⚡ 즉시 조치사항:")
+                for i, action in enumerate(ai_analysis['immediate_actions'], 1):
+                    print(f"   {i}. {action}")
+                
+                print(f"\n🔧 장기적 해결방안:")
+                for i, solution in enumerate(ai_analysis['long_term_solutions'], 1):
+                    print(f"   {i}. {solution}")
+                
+                print(f"\n🛡️ 예방 방법:")
+                for i, tip in enumerate(ai_analysis['prevention_tips'], 1):
+                    print(f"   {i}. {tip}")
+                    
+            except Exception as e:
+                print(f"❌ AI 분석 실패: {e}")
+                ai_analysis = None
         
-        # Slack 알림 추가
+        # 기존 패턴 분석 (AI 분석 실패시 또는 백업용)
+        if not ai_analysis:
+            template_str = str(template).lower()
+            if 'nullpointer' in template_str:
+                print(f"🎯 권장사항: 널체크 코드 추가 필요")
+            elif 'database' in template_str or 'connection' in template_str:
+                print(f"🎯 권장사항: DB 커넥션 풀 상태 확인")
+            elif 'outofmemory' in template_str:
+                print(f"🎯 권장사항: 메모리 사용량 및 힙 크기 확인")
+            elif 'filenotfound' in template_str:
+                print(f"🎯 권장사항: 파일 경로 및 권한 확인")
+        
+        # Slack 알림 (AI 분석 결과 포함)
         if self.slack_notifier:
-            # 현재 처리 중인 클러스터 ID 가져오기 (기존 로직에서)
-            # handle_error_clustering에서 cluster_id를 저장했다고 가정
-            cluster_id = getattr(self, 'current_cluster_id', 0)
-            self.slack_notifier.send_error_alert(template, count, cluster_id)
+            self.slack_notifier.send_error_alert_with_ai(
+                template=template, 
+                count=count, 
+                cluster_id=cluster_id,
+                ai_analysis=ai_analysis
+            )
         
         print(f"💡 TODO: RAG 시스템으로 해결책 검색")
     
