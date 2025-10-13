@@ -13,6 +13,11 @@ from datetime import datetime, timedelta
 from collections import defaultdict, deque
 import os
 import sys
+import logging
+
+# 로깅 설정
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # 기존 모듈 import
 try:
@@ -21,21 +26,39 @@ try:
     from watchdog.events import FileSystemEventHandler
     from dotenv import load_dotenv
     load_dotenv()
-    
-    try:
-        from slack_integration import SlackNotifier
-        SLACK_AVAILABLE = True
-    except ImportError:
-        SLACK_AVAILABLE = False
-        print("Slack 연동 모듈을 찾을 수 없습니다.")
-        
 except ImportError as e:
     print(f"필수 모듈 import 실패: {e}")
     print("pip install -r requirements.txt를 실행하세요.")
     sys.exit(1)
 
+try:
+    from slack_integration import SlackNotifier
+    SLACK_AVAILABLE = True
+except ImportError:
+    SLACK_AVAILABLE = False
+    print("Slack 연동 모듈을 찾을 수 없습니다.")
+
+try:
+    from ollama_integration import OllamaErrorAnalyzer
+    OLLAMA_AVAILABLE = True
+except ImportError:
+    OLLAMA_AVAILABLE = False
+    print("Ollama 연동 모듈을 찾을 수 없습니다. AI 분석 기능이 비활성화됩니다.")
+
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'log_monitoring_secret_key'
+
+# Flask 로그 비활성화
+import logging
+
+# Werkzeug 로그만 비활성화 (안전한 방법)
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
+
+# 추가적인 로그 비활성화
+logging.getLogger('socketio').setLevel(logging.ERROR)
+logging.getLogger('engineio').setLevel(logging.ERROR)
+
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 # 전역 데이터 저장소
@@ -68,6 +91,12 @@ class WebDashboardHandler(FileSystemEventHandler):
             self.slack_notifier = SlackNotifier()
         else:
             self.slack_notifier = None
+        
+        # Ollama AI 분석기 초기화
+        if OLLAMA_AVAILABLE:
+            self.ollama_analyzer = OllamaErrorAnalyzer()
+        else:
+            self.ollama_analyzer = None
         
         print("✅ 웹 대시보드 핸들러 초기화 완료")
     
@@ -168,7 +197,8 @@ class WebDashboardHandler(FileSystemEventHandler):
                     'count': 0,
                     'first_seen': datetime.now().isoformat(),
                     'last_seen': datetime.now().isoformat(),
-                    'recent_logs': []
+                    'recent_logs': [],
+                    'ai_analysis': None  # AI 분석 결과 저장
                 }
             
             cluster = dashboard_data['clusters'][cluster_id]
@@ -185,17 +215,43 @@ class WebDashboardHandler(FileSystemEventHandler):
             
             # 빈발 패턴 감지 (3회 이상)
             if cluster['count'] >= 3:
-                # WebSocket으로 빈발 패턴 알림
+                # AI 분석 수행 (첫 번째 빈발 패턴 감지시 또는 주기적으로)
+                if cluster['count'] == 3 or cluster['count'] % 5 == 0:  # 3회, 8회, 13회... 마다 분석
+                    if self.ollama_analyzer and self.ollama_analyzer.enabled:
+                        analysis_start_time = datetime.now().strftime("%H:%M:%S")
+                        logger.info(f"🤖 웹 대시보드 AI 분석 시작: {template} (시작시간: {analysis_start_time})")
+                        try:
+                            ai_analysis = self.ollama_analyzer.analyze_error(
+                                error_log=error_line,
+                                error_template=template,
+                                occurrence_count=cluster['count'],
+                                context={
+                                    "cluster_id": cluster_id,
+                                    "detection_time": datetime.now().isoformat(),
+                                    "total_logs": dashboard_data['total_logs'],
+                                    "error_logs": dashboard_data['error_logs']
+                                }
+                            )
+                            cluster['ai_analysis'] = ai_analysis
+                            logger.info(f"AI 분석 완료: {template}")
+                        except Exception as e:
+                            logger.error(f"AI 분석 실패: {e}")
+                            cluster['ai_analysis'] = None
+                
+                # WebSocket으로 빈발 패턴 알림 (AI 분석 결과 포함)
                 socketio.emit('frequent_pattern', {
                     'cluster_id': cluster_id,
                     'template': template,
                     'count': cluster['count'],
-                    'severity': self.get_severity(cluster['count'])
+                    'severity': self.get_severity(cluster['count']),
+                    'ai_analysis': cluster.get('ai_analysis')
                 })
                 
-                # Slack 알림 (기존 로직)
+                # Slack 알림 (AI 분석 결과 포함)
                 if self.slack_notifier and self.slack_notifier.enabled:
-                    self.slack_notifier.send_error_alert(template, cluster['count'], cluster_id)
+                    self.slack_notifier.send_error_alert_with_ai(
+                        template, cluster['count'], cluster_id, cluster.get('ai_analysis')
+                    )
             
             # 전체 대시보드 데이터 업데이트
             dashboard_data['last_update'] = datetime.now().isoformat()
@@ -273,17 +329,19 @@ def get_stats():
 
 @app.route('/api/clusters')
 def get_clusters():
-    """클러스터 데이터 API"""
+    """클러스터 데이터 API (AI 분석 결과 포함)"""
     clusters_list = []
     for cluster_id, cluster_info in dashboard_data['clusters'].items():
-        clusters_list.append({
+        cluster_data = {
             'id': cluster_id,
             'template': cluster_info['template'],
             'count': cluster_info['count'],
             'first_seen': cluster_info['first_seen'],
             'last_seen': cluster_info['last_seen'],
-            'severity': web_handler.get_severity(cluster_info['count']) if web_handler else 'unknown'
-        })
+            'severity': web_handler.get_severity(cluster_info['count']) if web_handler else 'unknown',
+            'ai_analysis': cluster_info.get('ai_analysis')  # AI 분석 결과 포함
+        }
+        clusters_list.append(cluster_data)
     
     # 발생 횟수 순으로 정렬
     clusters_list.sort(key=lambda x: x['count'], reverse=True)
@@ -630,7 +688,11 @@ def create_templates():
         socket.on('frequent_pattern', function(data) {
             console.log('빈발 패턴 감지:', data);
             updateClusters();
-            showNotification(`빈발 패턴 감지: ${data.template} (${data.count}회)`);
+            let message = `빈발 패턴 감지: ${data.template} (${data.count}회)`;
+            if (data.ai_analysis) {
+                message += `\n🤖 AI 분석: ${data.ai_analysis.error_type} (신뢰도: ${data.ai_analysis.confidence}%)`;
+            }
+            showNotification(message);
         });
         
         // 데이터 업데이트 함수들
@@ -662,6 +724,24 @@ def create_templates():
                             <div style="font-size: 0.8em; color: #666; margin-top: 5px;">
                                 마지막: ${new Date(cluster.last_seen).toLocaleString()}
                             </div>
+                            ${cluster.ai_analysis ? `
+                                <div class="ai-analysis" style="margin-top: 10px; padding: 10px; background: #f0f8ff; border-radius: 5px; border-left: 3px solid #007bff;">
+                                    <div style="font-weight: bold; color: #007bff; margin-bottom: 5px;">
+                                        🤖 AI 분석 결과 (신뢰도: ${cluster.ai_analysis.confidence}%)
+                                    </div>
+                                    <div style="font-size: 0.85em;">
+                                        <div><strong>에러 유형:</strong> ${cluster.ai_analysis.error_type}</div>
+                                        <div><strong>심각도:</strong> ${cluster.ai_analysis.severity}</div>
+                                        <div><strong>근본 원인:</strong> ${cluster.ai_analysis.root_cause}</div>
+                                        <div style="margin-top: 5px;">
+                                            <strong>즉시 조치사항:</strong>
+                                            <ul style="margin: 2px 0; padding-left: 15px;">
+                                                ${cluster.ai_analysis.immediate_actions.map(action => `<li>${action}</li>`).join('')}
+                                            </ul>
+                                        </div>
+                                    </div>
+                                </div>
+                            ` : ''}
                         </div>
                     `).join('');
                 });

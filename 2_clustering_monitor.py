@@ -37,6 +37,13 @@ except ImportError:
     LOG_SAVER_AVAILABLE = False
     print("로그 블록 저장 모듈을 찾을 수 없습니다. 로컬 저장 기능 비활성화")
 
+try:
+    from ollama_integration import OllamaErrorAnalyzer
+    OLLAMA_AVAILABLE = True
+except ImportError:
+    OLLAMA_AVAILABLE = False
+    print("Ollama 연동 모듈을 찾을 수 없습니다. AI 분석 기능이 비활성화됩니다.")
+
 class LogClusteringHandler(FileSystemEventHandler):
     """실시간 로그 클러스터링 핸들러 (로컬 저장 기능 포함)"""
     
@@ -100,6 +107,16 @@ class LogClusteringHandler(FileSystemEventHandler):
         else:
             self.log_saver = None
             print("⚠️ 로컬 저장 기능 비활성화")
+        
+        # Ollama AI 분석기 초기화
+        if OLLAMA_AVAILABLE:
+            self.ollama_analyzer = OllamaErrorAnalyzer()
+            if self.ollama_analyzer.enabled:
+                print("✅ Ollama AI 분석기 활성화됨")
+            else:
+                print("⚠️ Ollama 비활성화 - 기본 분석만 진행")
+        else:
+            self.ollama_analyzer = None
     
     def initialize_drain3(self):
         """Drain3 초기화 (버전 호환성 개선)"""
@@ -337,6 +354,13 @@ class LogClusteringHandler(FileSystemEventHandler):
                     self.alert_frequent_error(template, cluster_size, cluster_id, examples)
                     self.last_alert_time[cluster_id] = datetime.now()
                     
+                    self.alert_frequent_error(error_line, template, cluster_size, cluster_id)
+            else:
+                print(f"🔍 디버깅: 클러스터 {cluster_id} 크기가 0인 이유 조사")
+                clusters_dict = self.get_clusters_dict()
+                print(f"   전체 클러스터 수: {len(clusters_dict)}")
+                print(f"   클러스터 ID {cluster_id} 존재 여부: {cluster_id in clusters_dict}")
+                
         except Exception as e:
             print(f"❌ 클러스터링 처리 오류: {e}")
         
