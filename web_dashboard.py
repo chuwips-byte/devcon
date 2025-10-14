@@ -59,6 +59,15 @@ except ImportError as e:
     print(f"필수 모듈 import 실패: {e}")
     print("pip install -r requirements.txt를 실행하세요.")
 
+# Ollama 연동 import 추가
+try:
+    from ollama_integration import OllamaErrorAnalyzer
+    OLLAMA_AVAILABLE = True
+except ImportError:
+    OLLAMA_AVAILABLE = False
+    print("Ollama 연동 모듈을 찾을 수 없습니다. AI 분석 기능이 비활성화됩니다.")
+
+
 # Flask 앱 생성
 app = Flask(__name__)
 app.secret_key = 'your-secret-key-here'
@@ -116,6 +125,12 @@ class WebDashboardHandler(FileSystemEventHandler):
         # Drain3 초기화
         self.template_miner = None
         self.initialize_drain3()
+
+        # Ollama AI 분석기 초기화
+        if OLLAMA_AVAILABLE:
+            self.ollama_analyzer = OllamaErrorAnalyzer()
+        else:
+            self.ollama_analyzer = None
 
         print("✅ 웹 대시보드 핸들러 초기화 완료")
 
@@ -228,6 +243,27 @@ class WebDashboardHandler(FileSystemEventHandler):
 
             # 빈발 패턴 감지 및 알림
             if cluster['count'] >= 3 and cluster['count'] % 5 == 0:
+                if self.ollama_analyzer and self.ollama_analyzer.enabled:
+                    analysis_start_time = datetime.now().strftime("%H:%M:%S")
+                    print(f"🤖 웹 대시보드 AI 분석 시작: {template} (시작시간: {analysis_start_time})")
+                    try:
+                        ai_analysis = self.ollama_analyzer.analyze_error(
+                            error_log=line,
+                            error_template=template,
+                            occurrence_count=cluster['count'],
+                            context={
+                                "cluster_id": cluster_id,
+                                "detection_time": datetime.now().isoformat(),
+                                "total_logs": dashboard_data['total_logs'],
+                                "error_logs": dashboard_data['error_logs']
+                            }
+                        )
+                        cluster['ai_analysis'] = ai_analysis
+                        print(f"AI 분석 완료: {template}")
+                    except Exception as e:
+                        print(f"AI 분석 실패: {e}")
+                        cluster['ai_analysis'] = None
+
                 self.send_frequent_pattern_alert(cluster_id, cluster)
 
         except Exception as e:
@@ -318,7 +354,7 @@ def monitor_ssh_logs(ssh_client, log_path):
                 # 실시간으로 클라이언트에 전송
                 socketio.emit('ssh_log_update', ssh_log_entry)
 
-                print(f"SSH 로그: {line}")
+                # print(f"SSH 로그: {line}")
 
     except Exception as e:
         print(f"❌ SSH 로그 모니터링 오류: {e}")
