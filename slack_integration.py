@@ -11,11 +11,25 @@ from typing import Optional, List, Dict, Any
 from dotenv import load_dotenv
 load_dotenv()  # .env 파일 로드
 
+# Jira 연동 모듈 임포트 (선택적)
+try:
+    from jira_integration import JiraIntegration
+    JIRA_AVAILABLE = True
+except ImportError:
+    JIRA_AVAILABLE = False
+    print("⚠️ Jira 연동 모듈을 찾을 수 없습니다. Jira 기능이 비활성화됩니다.")
+
 class SlackNotifier:
     def __init__(self, webhook_url: Optional[str] = None):
         self.webhook_url = webhook_url or os.getenv('SLACK_WEBHOOK_URL')
         self.enabled = bool(self.webhook_url)
-        
+
+        # Jira 연동 초기화
+        self.jira = JiraIntegration() if JIRA_AVAILABLE else None
+
+        # 대시보드 URL 설정
+        self.dashboard_url = os.getenv('DASHBOARD_URL', 'http://localhost:5000')
+
         if not self.enabled:
             print("Slack Webhook URL이 설정되지 않았습니다. 콘솔 출력만 진행합니다.")
     
@@ -59,7 +73,37 @@ class SlackNotifier:
             print(f"Slack 연결 오류: {e}")
             return False
     
-    def send_error_alert_with_ai(self, template: str, count: int, cluster_id: int, ai_analysis: Optional[Dict] = None) -> bool:
+    def _create_jira_link_field(self, error_info: Dict[str, Any]) -> Optional[Dict]:
+        """Jira 이슈 생성 링크 필드 생성"""
+        if not self.jira:
+            return None
+
+        # 웹 링크 생성
+        web_link = self.jira.generate_web_link(error_info)
+
+        if not web_link or web_link == "Jira 설정이 필요합니다.":
+            return None
+
+        # 제목 생성 (사용자가 복사해서 붙여넣기 가능하도록)
+        template = error_info.get('template', 'Unknown Error')
+        count = error_info.get('count', 0)
+        suggested_title = f"[Log Monitor] {template} (발생 {count}회)"
+
+        # 제목이 너무 길면 잘라내기
+        if len(suggested_title) > 100:
+            suggested_title = suggested_title[:97] + "..."
+
+        field = {
+            "title": "🎫 Jira 이슈 생성",
+            "value": (
+                f"<{web_link}|📝 여기를 클릭하여 Jira 이슈 작성>\n"
+                f"*제안 제목:* `{suggested_title}`"
+            ),
+            "short": False
+        }
+        return field
+
+    def send_error_alert_with_ai(self, template: str, count: int, cluster_id: int, ai_analysis: Optional[Dict] = None, examples: Optional[List] = None) -> bool:
         """AI 분석 결과를 포함한 빈발 에러 알림 전송"""
         
         # 심각도 결정
@@ -84,134 +128,185 @@ class SlackNotifier:
         if ai_analysis:
             # AI 분석 기반 권장사항
             recommendations = self._format_ai_recommendations(ai_analysis)
-            
+
             # 콘솔 출력 (항상 실행)
             self._print_console_alert_with_ai(template, count, severity, ai_analysis)
-            
+
             # Slack 전송 (활성화된 경우만)
             if not self.enabled:
                 return True
-            
+
+            # 에러 정보 준비 (Jira 연동용)
+            error_info = {
+                'template': template,
+                'count': count,
+                'cluster_id': cluster_id,
+                'severity': severity,
+                'ai_analysis': ai_analysis,
+                'examples': examples
+            }
+
+            # 기본 attachment
+            attachment = {
+                "color": color,
+                "fields": [
+                    {
+                        "title": "📊 에러 패턴",
+                        "value": f"```{template}```",
+                        "short": False
+                    },
+                    {
+                        "title": "🔢 발생 횟수",
+                        "value": f"*{count}번*",
+                        "short": True
+                    },
+                    {
+                        "title": "🏷️ 클러스터 ID",
+                        "value": f"`{cluster_id}`",
+                        "short": True
+                    },
+                    {
+                        "title": "🤖 AI 분석 심각도",
+                        "value": f"*{ai_analysis.get('severity', 'Unknown')}*",
+                        "short": True
+                    },
+                    {
+                        "title": "📈 AI 신뢰도",
+                        "value": f"`{ai_analysis.get('confidence', 0)}%`",
+                        "short": True
+                    },
+                    {
+                        "title": "🔍 근본 원인",
+                        "value": f"_{ai_analysis.get('root_cause', '분석 불가')}_",
+                        "short": False
+                    },
+                    {
+                        "title": "⚡ 즉시 조치사항",
+                        "value": recommendations['immediate'],
+                        "short": False
+                    },
+                    {
+                        "title": "🔧 장기적 해결방안",
+                        "value": recommendations['long_term'],
+                        "short": False
+                    },
+                    {
+                        "title": "🛡️ 예방 방법",
+                        "value": recommendations['prevention'],
+                        "short": False
+                    },
+                    {
+                        "title": "⏰ 감지 시간",
+                        "value": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "short": True
+                    }
+                ],
+                "footer": f"🤖 Log Monitoring System + AI Analysis ({ai_analysis.get('model_used', 'Unknown')})",
+                "ts": int(datetime.now().timestamp())
+            }
+
+            # 원본 로그 예시 추가
+            if examples and len(examples) > 0:
+                example_text = self._format_log_examples(examples)
+                attachment["fields"].append({
+                    "title": "📝 원본 로그 예시",
+                    "value": example_text,
+                    "short": False
+                })
+
+            # Jira 링크 필드 추가
+            jira_link_field = self._create_jira_link_field(error_info)
+            if jira_link_field:
+                attachment["fields"].append(jira_link_field)
+
             message = {
                 "text": f"{emoji} AI 분석된 빈발 에러 패턴 감지 - {severity}",
-                "attachments": [
-                    {
-                        "color": color,
-                        "fields": [
-                            {
-                                "title": "에러 패턴",
-                                "value": f"```{template}```",
-                                "short": False
-                            },
-                            {
-                                "title": "발생 횟수",
-                                "value": f"{count}번",
-                                "short": True
-                            },
-                            {
-                                "title": "클러스터 ID",
-                                "value": str(cluster_id),
-                                "short": True
-                            },
-                            {
-                                "title": "AI 분석 심각도",
-                                "value": f"{ai_analysis.get('severity', 'Unknown')}",
-                                "short": True
-                            },
-                            {
-                                "title": "AI 신뢰도",
-                                "value": f"{ai_analysis.get('confidence', 0)}%",
-                                "short": True
-                            },
-                            {
-                                "title": "근본 원인 (AI 분석)",
-                                "value": ai_analysis.get('root_cause', '분석 불가'),
-                                "short": False
-                            },
-                            {
-                                "title": "즉시 조치사항 (AI 권장)",
-                                "value": recommendations['immediate'],
-                                "short": False
-                            },
-                            {
-                                "title": "장기적 해결방안 (AI 권장)",
-                                "value": recommendations['long_term'],
-                                "short": False
-                            },
-                            {
-                                "title": "예방 방법 (AI 권장)",
-                                "value": recommendations['prevention'],
-                                "short": False
-                            },
-                            {
-                                "title": "감지 시간",
-                                "value": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                "short": True
-                            }
-                        ],
-                        "footer": f"Log Monitoring System + AI Analysis ({ai_analysis.get('model_used', 'Unknown')})",
-                        "ts": int(datetime.now().timestamp())
-                    }
-                ]
+                "attachments": [attachment]
             }
         else:
             # 기존 방식 (AI 분석 없음)
             recommendations = self._get_recommendations(template)
-            
+
             # 콘솔 출력 (항상 실행)
-            self._print_console_alert(template, count, severity, recommendations)
-            
+            self._print_console_alert(template, count, severity, recommendations, examples)
+
             # Slack 전송 (활성화된 경우만)
             if not self.enabled:
                 return True
-            
+
+            # 에러 정보 준비 (Jira 연동용)
+            error_info = {
+                'template': template,
+                'count': count,
+                'cluster_id': cluster_id,
+                'severity': severity,
+                'examples': examples
+            }
+
+            # 기본 attachment
+            attachment = {
+                "color": color,
+                "fields": [
+                    {
+                        "title": "📊 에러 패턴",
+                        "value": f"```{template}```",
+                        "short": False
+                    },
+                    {
+                        "title": "🔢 발생 횟수",
+                        "value": f"*{count}번*",
+                        "short": True
+                    },
+                    {
+                        "title": "🏷️ 클러스터 ID",
+                        "value": f"`{cluster_id}`",
+                        "short": True
+                    },
+                    {
+                        "title": "🚦 심각도",
+                        "value": f"{emoji} *{severity}*",
+                        "short": True
+                    },
+                    {
+                        "title": "⏰ 감지 시간",
+                        "value": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "short": True
+                    }
+                ],
+                "footer": "📊 Log Monitoring System",
+                "ts": int(datetime.now().timestamp())
+            }
+
+            # 원본 로그 예시 추가
+            if examples and len(examples) > 0:
+                example_text = self._format_log_examples(examples)
+                attachment["fields"].append({
+                    "title": "📝 원본 로그 예시",
+                    "value": example_text,
+                    "short": False
+                })
+
+            # 권장사항 추가
+            attachment["fields"].append({
+                "title": "💡 권장 조치사항",
+                "value": recommendations,
+                "short": False
+            })
+
+            # Jira 링크 필드 추가
+            jira_link_field = self._create_jira_link_field(error_info)
+            if jira_link_field:
+                attachment["fields"].append(jira_link_field)
+
             message = {
                 "text": f"{emoji} 빈발 에러 패턴 감지 - {severity}",
-                "attachments": [
-                    {
-                        "color": color,
-                        "fields": [
-                            {
-                                "title": "에러 패턴",
-                                "value": f"```{template}```",
-                                "short": False
-                            },
-                            {
-                                "title": "발생 횟수",
-                                "value": f"{count}번",
-                                "short": True
-                            },
-                            {
-                                "title": "클러스터 ID",
-                                "value": str(cluster_id),
-                                "short": True
-                            },
-                            {
-                                "title": "심각도",
-                                "value": f"{emoji} {severity}",
-                                "short": True
-                            },
-                            {
-                                "title": "감지 시간",
-                                "value": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                "short": True
-                            },
-                            {
-                                "title": "권장 조치사항",
-                                "value": recommendations,
-                                "short": False
-                            }
-                        ],
-                        "footer": "Log Monitoring System",
-                        "ts": int(datetime.now().timestamp())
-                    }
-                ]
+                "attachments": [attachment]
             }
         
         try:
             response = requests.post(self.webhook_url, json=message, timeout=10)
             if response.status_code == 200:
-                print("Slack 알림 전송 성공")
+                print("✅ Slack 알림 전송 성공")
                 return True
             else:
                 print(f"Slack 알림 전송 실패: HTTP {response.status_code}")
@@ -234,28 +329,54 @@ class SlackNotifier:
     
     def _print_console_alert_with_ai(self, template: str, count: int, severity: str, ai_analysis: Dict):
         """AI 분석 결과를 포함한 콘솔 알림 출력"""
-        print("\n" + "="*80)
-        print(f"SLACK 알림 (AI 분석 포함) - {severity}")
-        print("="*80)
-        print(f"패턴: {template}")
-        print(f"횟수: {count}번")
-        print(f"AI 에러 유형: {ai_analysis.get('error_type', 'Unknown')}")
-        print(f"AI 심각도: {ai_analysis.get('severity', 'Unknown')}")
-        print(f"AI 신뢰도: {ai_analysis.get('confidence', 0)}%")
-        print(f"근본 원인: {ai_analysis.get('root_cause', '분석 불가')}")
-        print(f"AI 권장 즉시 조치사항:")
-        for action in ai_analysis.get('immediate_actions', []):
-            print(f"  • {action}")
-        print(f"AI 권장 장기적 해결방안:")
-        for solution in ai_analysis.get('long_term_solutions', []):
-            print(f"  • {solution}")
-        print(f"AI 권장 예방 방법:")
-        for tip in ai_analysis.get('prevention_tips', []):
-            print(f"  • {tip}")
-        print("="*80)
+        # 심각도별 색상 이모지
+        severity_emoji = {
+            "매우 심각": "🔴",
+            "심각": "🟠",
+            "주의": "🟡",
+            "경미": "🟢"
+        }
+        emoji = severity_emoji.get(severity, "⚪")
+
+        print("\n" + "━"*70)
+        print(f"  {emoji} AI 분석된 빈발 에러 패턴 감지 - {severity}")
+        print("━"*70)
+
+        print(f"\n📊 에러 정보")
+        print(f"  ├─ 패턴: {template[:100]}{'...' if len(template) > 100 else ''}")
+        print(f"  └─ 발생 횟수: {count}번")
+
+        print(f"\n🤖 AI 분석 결과")
+        print(f"  ├─ 에러 유형: {ai_analysis.get('error_type', 'Unknown')}")
+        print(f"  ├─ AI 심각도: {ai_analysis.get('severity', 'Unknown')}")
+        print(f"  ├─ 신뢰도: {ai_analysis.get('confidence', 0)}%")
+        print(f"  └─ 근본 원인: {ai_analysis.get('root_cause', '분석 불가')}")
+
+        immediate_actions = ai_analysis.get('immediate_actions', [])
+        if immediate_actions:
+            print(f"\n⚡ 즉시 조치사항")
+            for action in immediate_actions:
+                print(f"  • {action}")
+
+        long_term_solutions = ai_analysis.get('long_term_solutions', [])
+        if long_term_solutions:
+            print(f"\n🔧 장기적 해결방안")
+            for solution in long_term_solutions:
+                print(f"  • {solution}")
+
+        prevention_tips = ai_analysis.get('prevention_tips', [])
+        if prevention_tips:
+            print(f"\n🛡️ 예방 방법")
+            for tip in prevention_tips:
+                print(f"  • {tip}")
+
+        print(f"\n🎫 Jira 이슈 생성 링크가 Slack에 포함되었습니다")
+        print("━"*70)
     
-    def send_error_alert(self, template: str, count: int, cluster_id: int) -> bool:
-        """빈발 에러 알림 전송 (기존 방식)"""
+    def send_error_alert(self, template: str, count: int, cluster_id: int, examples: Optional[List] = None) -> bool:
+        """빈발 에러 알림 전송 - send_error_alert_with_ai로 리다이렉트"""
+        # AI 분석 없이 send_error_alert_with_ai 호출
+        return self.send_error_alert_with_ai(template, count, cluster_id, ai_analysis=None, examples=examples)
         
         # 심각도 결정
         if count >= 50:
@@ -430,7 +551,14 @@ class SlackNotifier:
                     "value": cluster_text,
                     "short": False
                 })
-            
+
+            # 웹 대시보드 링크 추가
+            fields.append({
+                "title": "🖥️ 웹 대시보드",
+                "value": f"<{self.dashboard_url}|📊 실시간 대시보드 열기>",
+                "short": False
+            })
+
             # 시스템 상태 판단
             system_status = self._get_system_status(error_rate)
             color = system_status["color"]
@@ -549,30 +677,43 @@ class SlackNotifier:
     
     def _print_console_alert(self, template: str, count: int, severity: str, recommendations: str, examples: List = None):
         """콘솔에 알림 출력 (향상된 버전)"""
-        print("\n" + "="*60)
-        print(f"SLACK 알림 - {severity}")
-        print("="*60)
-        print(f"패턴: {template}")
-        print(f"횟수: {count}번")
-        print(f"권장사항:")
+        # 심각도별 색상 이모지
+        severity_emoji = {
+            "매우 심각": "🔴",
+            "심각": "🟠",
+            "주의": "🟡",
+            "경미": "🟢"
+        }
+        emoji = severity_emoji.get(severity, "⚪")
+
+        print("\n" + "━"*70)
+        print(f"  {emoji} 빈발 에러 패턴 감지 - {severity}")
+        print("━"*70)
+        print(f"\n📊 에러 정보")
+        print(f"  ├─ 패턴: {template[:100]}{'...' if len(template) > 100 else ''}")
+        print(f"  └─ 발생 횟수: {count}번")
+
+        print(f"\n💡 권장 조치사항")
         for line in recommendations.split('\n'):
-            print(f"  {line}")
-        
-        # 원본 로그 예시 출력 (새로운 기능!)
+            if line.strip():
+                print(f"  {line}")
+
+        # 원본 로그 예시 출력
         if examples and len(examples) > 0:
-            print(f"\n📝 원본 로그 예시:")
-            for i, example in enumerate(examples[:2], 1):  # 콘솔에는 2개만
+            print(f"\n📝 원본 로그 예시")
+            for i, example in enumerate(examples[:2], 1):
                 if isinstance(example, dict):
                     text = example.get('text', str(example))
                 else:
                     text = str(example)
-                
+
                 # 길이 제한
                 if len(text) > 100:
                     text = text[:100] + "..."
-                print(f"  예시 {i}: {text}")
-        
-        print("="*60)
+                print(f"  [{i}] {text}")
+
+        print(f"\n🎫 Jira 이슈 생성 링크가 Slack에 포함되었습니다")
+        print("━"*70)
 
 def test_slack_integration():
     """Slack 연동 테스트 함수 (향상된 버전)"""
