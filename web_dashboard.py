@@ -21,7 +21,7 @@ import psutil
 
 # Jira 연동 import 추가
 try:
-    from jira_integration import fetch_bug_issues
+    from jira_integration import JiraIntegration
 
     JIRA_AVAILABLE = True
     print("✅ Jira 연동 모듈 로드 성공")
@@ -96,19 +96,21 @@ module_status = {
 
 # 웹 대시보드 핸들러 클래스
 class WebDashboardHandler(FileSystemEventHandler):
-    """웹 대시보드용 파일 모니터링 핸들러"""
+    """웹 대시보드용 파일 모니터링 핸들러 - 개선 버전"""
 
     def __init__(self, watch_dir="logs"):
         self.watch_dir = watch_dir
         self.last_position = {}
-        # 에러 키워드 확장
+
+        # 🔥 개선: 더 포괄적인 에러 키워드
         self.error_keywords = [
             'ERROR', 'Exception', 'error', 'FATAL', 'CRITICAL', 'failed',
             'failure', 'NullPointerException', 'SQLException', 'OutOfMemoryError',
-            'ConnectionException', 'TimeoutException', 'refused', 'denied'
+            'ConnectionException', 'TimeoutException', 'refused', 'denied',
+            'Error:', 'Exception:', 'WARN', 'WARNING'  # 추가
         ]
 
-        # Slack 연동 초기화 (선택사항)
+        # Slack 연동 초기화
         self.slack_notifier = None
         if SLACK_AVAILABLE:
             self.slack_notifier = SlackNotifier()
@@ -128,8 +130,14 @@ class WebDashboardHandler(FileSystemEventHandler):
             self.template_miner = TemplateMiner(config=config)
             print("✅ Drain3 엔진 초기화 성공")
         except Exception as e:
-            print(f"❌ Drain3 초기화 실패: {e}")
-            self.template_miner = None
+            print(f"⚠️ Drain3 초기화 실패 (기본 설정 사용): {e}")
+            try:
+                # 설정 파일 없이 초기화
+                self.template_miner = TemplateMiner()
+                print("✅ Drain3 기본 설정으로 초기화 성공")
+            except Exception as e2:
+                print(f"❌ Drain3 초기화 완전 실패: {e2}")
+                self.template_miner = None
 
     def on_modified(self, event):
         """파일 수정 이벤트 처리"""
@@ -137,7 +145,7 @@ class WebDashboardHandler(FileSystemEventHandler):
             self.process_new_logs(event.src_path)
 
     def process_new_logs(self, file_path):
-        """새로운 로그 라인 처리"""
+        """새로운 로그 라인 처리 - 개선 버전"""
         try:
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                 # 마지막 읽은 위치부터 읽기
@@ -154,34 +162,70 @@ class WebDashboardHandler(FileSystemEventHandler):
                     if not line:
                         continue
 
+                    # 🔥 개선: 로그 파싱 강화
+                    is_error = self.is_error_line(line)
+
                     # 대시보드 데이터 업데이트
-                    self.update_dashboard_data(line)
+                    self.update_dashboard_data(line, is_error)
 
                     # 에러 로그인 경우 클러스터링 처리
-                    if self.is_error_line(line):
+                    if is_error:
                         self.handle_error_clustering(line)
+
+                        # 🔥 추가: Socket.IO로 실시간 전송
+                        try:
+                            socketio.emit('new_error_log', {
+                                'timestamp': datetime.now().isoformat(),
+                                'content': line,
+                                'type': 'error'
+                            })
+                        except Exception as e:
+                            print(f"Socket 전송 오류: {e}")
 
         except Exception as e:
             print(f"❌ 파일 읽기 오류: {e}")
 
     def is_error_line(self, line):
-        """에러 라인 여부 판단"""
-        return any(keyword in line for keyword in self.error_keywords)
+        """에러 라인 여부 판단 - 개선 버전"""
+        line_upper = line.upper()
 
-    def update_dashboard_data(self, line):
-        """대시보드 데이터 업데이트"""
+        # 키워드 매칭
+        for keyword in self.error_keywords:
+            if keyword.upper() in line_upper:
+                return True
+
+        # 추가 패턴 검사
+        error_patterns = [
+            'EXCEPTION',
+            'STACK TRACE',
+            'CAUSED BY',
+            'AT LINE',
+            'FAILED TO',
+            'UNABLE TO',
+            'COULD NOT'
+        ]
+
+        for pattern in error_patterns:
+            if pattern in line_upper:
+                return True
+
+        return False
+
+    def update_dashboard_data(self, line, is_error=False):
+        """대시보드 데이터 업데이트 - 개선 버전"""
         dashboard_data['total_logs'] += 1
 
-        # 최근 로그에 추가
+        # 🔥 개선: 로그 타입 명확히 표시
         log_entry = {
             'timestamp': datetime.now().isoformat(),
             'content': line,
-            'type': 'error' if self.is_error_line(line) else 'info'
+            'type': 'error' if is_error else 'info',
+            'severity': self.get_log_severity(line) if is_error else 'info'
         }
         dashboard_data['recent_logs'].append(log_entry)
 
         # 에러 로그 카운트
-        if self.is_error_line(line):
+        if is_error:
             dashboard_data['error_logs'] += 1
 
             # 에러 타임라인 업데이트
@@ -191,6 +235,22 @@ class WebDashboardHandler(FileSystemEventHandler):
                 'count': 1
             }
             dashboard_data['error_timeline'].append(timeline_entry)
+
+            # 🔥 추가: 콘솔에도 출력
+            print(f"🚨 [ERROR] {line[:100]}...")
+
+    def get_log_severity(self, line):
+        """로그 심각도 판단"""
+        line_upper = line.upper()
+
+        if 'FATAL' in line_upper or 'CRITICAL' in line_upper:
+            return 'critical'
+        elif 'ERROR' in line_upper or 'EXCEPTION' in line_upper:
+            return 'error'
+        elif 'WARN' in line_upper:
+            return 'warning'
+        else:
+            return 'info'
 
     def handle_error_clustering(self, line):
         """에러 로그 클러스터링 처리"""
@@ -226,9 +286,24 @@ class WebDashboardHandler(FileSystemEventHandler):
 
             dashboard_data['cluster_stats'][cluster_id] += 1
 
+            # 🔥 개선: 콘솔에 클러스터 정보 출력
+            print(f"📊 클러스터 {cluster_id}: {template[:80]}... (발생: {cluster['count']}회)")
+
             # 빈발 패턴 감지 및 알림
             if cluster['count'] >= 3 and cluster['count'] % 5 == 0:
                 self.send_frequent_pattern_alert(cluster_id, cluster)
+
+            # 🔥 추가: Socket.IO로 클러스터 업데이트 전송
+            try:
+                socketio.emit('cluster_update', {
+                    'cluster_id': cluster_id,
+                    'template': template,
+                    'count': cluster['count'],
+                    'severity': cluster['severity'],
+                    'last_seen': cluster['last_seen']
+                })
+            except Exception as e:
+                print(f"Socket 전송 오류: {e}")
 
         except Exception as e:
             print(f"❌ 클러스터링 처리 오류: {e}")
@@ -243,7 +318,7 @@ class WebDashboardHandler(FileSystemEventHandler):
     def get_template(self, result):
         """템플릿 추출"""
         if isinstance(result, dict):
-            return result.get('template', 'unknown')
+            return result.get('template_mined', result.get('template', 'unknown'))
         else:
             return getattr(result, 'template', 'unknown')
 
@@ -261,6 +336,9 @@ class WebDashboardHandler(FileSystemEventHandler):
     def send_frequent_pattern_alert(self, cluster_id, cluster):
         """빈발 패턴 알림 전송"""
         if self.slack_notifier:
+            # 예제 로그 수집
+            examples = list(cluster['recent_logs'])
+
             message = f"""🚨 빈발 에러 패턴 감지!
 
 패턴 ID: {cluster_id}
@@ -326,172 +404,191 @@ def monitor_ssh_logs(ssh_client, log_path):
         module_status['ssh_connection']['process'] = None
 
 
-def rag_learning_process(max_results=10):
-    try:
-        print("RAG 학습 프로세스 시작!")  # 추가
-        module_status['rag_learning']['status'] = 'training'
+def rag_learning_process(model_name='sentence-transformers/all-MiniLM-L6-v2', max_results=20):
+    """
+    RAG 학습 프로세스 (Jira 연동) - Bug만 정확히 수집
 
-        # 1단계: Jira 연결 확인
-        print("1단계 이벤트 발송 중...")  # 추가
-        socketio.emit('rag_progress', {
-            'stage': 'Jira 연결 확인 중...',
-            'progress': 1,
-            'total': 5
-        })
-        print("1단계 이벤트 발송 완료")  # 추가
-        module_status['rag_learning']['progress'] = {
-            'stage': 'Jira 연결 확인',
-            'current': 1,
-            'total': 5,
-            'message': 'Jira API 연결을 확인하고 있습니다.'
-        }
-        time.sleep(2)
+    Args:
+        model_name: 사용할 임베딩 모델 이름
+        max_results: 수집할 최대 Bug 이슈 개수 (기본값: 20)
+    """
+    try:
+        socketio.emit('rag_progress', {'stage': 'init', 'progress': 0, 'total': 100})
 
         if not JIRA_AVAILABLE:
-            raise Exception("Jira 연동 모듈이 사용할 수 없습니다. 환경변수를 확인하세요.")
+            raise Exception("Jira 모듈을 사용할 수 없습니다")
 
         if not RAG_TRAINER_AVAILABLE:
-            raise Exception("RAG 학습 모듈이 사용할 수 없습니다.")
+            raise Exception("RAG Trainer 모듈을 사용할 수 없습니다")
 
-        # 2단계: Jira 이슈 수집
-        socketio.emit('rag_progress', {
-            'stage': f'Jira 이슈 수집 중... (최대 {max_results}개)',
-            'progress': 2,
-            'total': 5
-        })
-        module_status['rag_learning']['progress'] = {
-            'stage': 'Jira 이슈 수집',
-            'current': 2,
-            'total': 5,
-            'message': f'프로젝트에서 버그 이슈를 수집하고 있습니다.'
-        }
+        from jira_integration import JiraIntegration
+        from rag_trainer import RAGTrainer
 
-        # 실제 Jira에서 이슈 가져오기
-        issues = fetch_bug_issues(max_results=max_results)
-        issue_count = len(issues)
+        # Jira 연결
+        socketio.emit('rag_progress', {'stage': 'connecting', 'progress': 10, 'total': 100, 'detail': 'Jira 연결 중...'})
+        jira = JiraIntegration()
 
-        if issue_count == 0:
-            raise Exception("수집된 Jira 이슈가 없습니다. JQL 조건을 확인하세요.")
+        # Bug 이슈만 검색하도록 JQL 수정
+        socketio.emit('rag_progress', {'stage': 'searching', 'progress': 20, 'total': 100, 'detail': 'Bug 이슈 검색 중...'})
 
-        print(f"📋 수집된 Jira 이슈: {issue_count}개")
-        time.sleep(1)
+        # 🔥 수정: Bug 타입만 정확히 가져오는 JQL
+        bug_jql = 'issuetype = Bug ORDER BY created DESC'
 
-        # 3단계: 텍스트 전처리 및 임베딩 생성
-        socketio.emit('rag_progress', {
-            'stage': f'이슈 데이터 처리 중... ({issue_count}개)',
-            'progress': 3,
-            'total': 5
-        })
-        module_status['rag_learning']['progress'] = {
-            'stage': '데이터 처리',
-            'current': 3,
-            'total': 5,
-            'message': f'{issue_count}개 이슈의 텍스트를 처리하고 임베딩을 생성하고 있습니다.'
-        }
+        all_issues = []
+        start_at = 0
+        batch_size = 50
 
-        processed_count = 0
-        for i, issue in enumerate(issues, 1):
+        # 🔥 수정: Bug 이슈를 정확히 max_results개까지만 수집
+        print(f"\n🎯 목표: Bug 이슈 {max_results}개 수집")
+
+        while len(all_issues) < max_results:
+            # 남은 개수만큼만 요청
+            remaining = max_results - len(all_issues)
+            current_batch_size = min(batch_size, remaining)
+
             try:
-                key = issue["key"]
-                fields = issue["fields"]
+                # 🔥 search_issues 메서드 사용 (jira_integration.py에 추가 필요)
+                issues_batch = jira.search_issues(
+                    jql=bug_jql,
+                    startAt=start_at,
+                    maxResults=current_batch_size
+                )
 
-                # 설명에서 신고내용과 처리내용 분리
-                desc = fields.get("description") or ""
-                신고내용, 처리내용 = "", ""
+                if not issues_batch:
+                    print(f"✅ 더 이상 Bug 이슈가 없습니다. 총 {len(all_issues)}개 수집됨")
+                    break
 
-                if "신고내용" in desc:
-                    parts = desc.split("처리내용")
-                    신고내용 = parts[0].replace("신고내용", "").strip()
-                    처리내용 = parts[1].strip() if len(parts) > 1 else ""
-                else:
-                    신고내용 = desc.strip()
+                # Bug 타입인지 재확인 (안전장치)
+                for issue in issues_batch:
+                    if len(all_issues) >= max_results:
+                        break
 
-                # RAG 학습에 이슈 추가
-                train_issue(key, 신고내용, 처리내용)
-                processed_count += 1
+                    # issuetype이 Bug인지 확인
+                    issue_type = issue.fields.issuetype.name if hasattr(issue.fields, 'issuetype') else 'Unknown'
 
-                # 실제 진행률 계산 (3단계 내에서 세부 진행률)
-                issue_progress = processed_count / issue_count  # 0.0 ~ 1.0
-                overall_progress = 2 + issue_progress  # 2단계 완료 + 3단계 진행률
+                    if issue_type.lower() == 'bug':
+                        all_issues.append(issue)
 
-                # 매 이슈마다 또는 5개마다 업데이트
-                if i % 5 == 0 or i == issue_count:
-                    socketio.emit('rag_progress', {
-                        'stage': f'이슈 처리 중... ({processed_count}/{issue_count})',
-                        'progress': overall_progress,
-                        'total': 5,
-                        'detail': f'{processed_count}개 처리 완료'
-                    })
+                        # 진행률 업데이트
+                        progress = 20 + (len(all_issues) / max_results) * 30  # 20-50% 구간
+                        socketio.emit('rag_progress', {
+                            'stage': 'collecting',
+                            'progress': int(progress),
+                            'total': 100,
+                            'detail': f'Bug 이슈 수집 중... ({len(all_issues)}/{max_results})'
+                        })
 
-                time.sleep(0.1)
+                        print(f"  ✓ {issue.key} 수집 ({len(all_issues)}/{max_results})")
+
+                # 다음 배치로
+                start_at += current_batch_size
+
+                # 무한루프 방지
+                if start_at > 1000:
+                    print(f"⚠️ 검색 한계 도달. Bug 이슈 {len(all_issues)}개만 수집됨")
+                    break
 
             except Exception as e:
-                print(f"❌ 이슈 {key} 처리 실패: {e}")
+                print(f"❌ 배치 수집 오류: {e}")
+                break
+
+        if len(all_issues) == 0:
+            raise Exception("Bug 타입의 이슈를 찾을 수 없습니다")
+
+        print(f"\n✅ 총 {len(all_issues)}개의 Bug 이슈 수집 완료")
+
+        # 이슈 데이터 전처리
+        socketio.emit('rag_progress', {'stage': 'preprocessing', 'progress': 50, 'total': 100, 'detail': 'Bug 데이터 전처리 중...'})
+
+        documents = []
+        for i, issue in enumerate(all_issues):
+            try:
+                # Bug 이슈 정보 추출
+                doc_text = f"Bug ID: {issue.key}\n"
+                doc_text += f"Summary: {issue.fields.summary}\n"
+
+                if hasattr(issue.fields, 'description') and issue.fields.description:
+                    doc_text += f"Description: {issue.fields.description}\n"
+
+                if hasattr(issue.fields, 'priority') and issue.fields.priority:
+                    doc_text += f"Priority: {issue.fields.priority.name}\n"
+
+                if hasattr(issue.fields, 'status') and issue.fields.status:
+                    doc_text += f"Status: {issue.fields.status.name}\n"
+
+                # Bug 관련 추가 정보
+                if hasattr(issue.fields, 'components') and issue.fields.components:
+                    components = [comp.name for comp in issue.fields.components]
+                    doc_text += f"Components: {', '.join(components)}\n"
+
+                if hasattr(issue.fields, 'labels') and issue.fields.labels:
+                    doc_text += f"Labels: {', '.join(issue.fields.labels)}\n"
+
+                documents.append({
+                    'id': issue.key,
+                    'text': doc_text,
+                    'type': 'bug',
+                    'metadata': {
+                        'issue_key': issue.key,
+                        'summary': issue.fields.summary,
+                        'priority': issue.fields.priority.name if hasattr(issue.fields, 'priority') and issue.fields.priority else 'Unknown',
+                        'status': issue.fields.status.name if hasattr(issue.fields, 'status') and issue.fields.status else 'Unknown'
+                    }
+                })
+
+                # 진행률 업데이트
+                progress = 50 + (i / len(all_issues)) * 20  # 50-70% 구간
+                socketio.emit('rag_progress', {
+                    'stage': 'preprocessing',
+                    'progress': int(progress),
+                    'total': 100,
+                    'detail': f'Bug 데이터 전처리 중... ({i+1}/{len(all_issues)})'
+                })
+
+            except Exception as e:
+                print(f"❌ 이슈 {issue.key} 처리 중 오류: {e}")
                 continue
 
-        print(f"✅ 처리 완료: {processed_count}/{issue_count}개 이슈")
+        if not documents:
+            raise Exception("처리 가능한 Bug 이슈가 없습니다")
 
-        # 4단계: 벡터 데이터베이스 저장
-        socketio.emit('rag_progress', {
-            'stage': '벡터 데이터베이스 저장 중...',
-            'progress': 4,
-            'total': 5
-        })
-        module_status['rag_learning']['progress'] = {
-            'stage': '벡터 저장',
-            'current': 4,
-            'total': 5,
-            'message': '처리된 데이터를 벡터 데이터베이스에 저장하고 있습니다.'
-        }
-        time.sleep(2)
+        print(f"\n✅ {len(documents)}개 문서 전처리 완료")
 
-        # 5단계: RAG 시스템 테스트
-        socketio.emit('rag_progress', {
-            'stage': 'RAG 시스템 테스트 중...',
-            'progress': 5,
-            'total': 5
-        })
-        module_status['rag_learning']['progress'] = {
-            'stage': 'RAG 테스트',
-            'current': 5,
-            'total': 5,
-            'message': 'RAG 시스템의 정상 동작을 확인하고 있습니다.'
-        }
-        time.sleep(2)
+        # RAG 모델 학습
+        socketio.emit('rag_progress', {'stage': 'training', 'progress': 70, 'total': 100, 'detail': 'RAG 모델 학습 중...'})
+
+        trainer = RAGTrainer(model_name=model_name)
+
+        # 벡터 데이터베이스 구축
+        socketio.emit('rag_progress', {'stage': 'indexing', 'progress': 80, 'total': 100, 'detail': 'Bug 데이터 인덱싱 중...'})
+        trainer.build_vector_database(documents)
+
+        # 모델 저장
+        socketio.emit('rag_progress', {'stage': 'saving', 'progress': 90, 'total': 100, 'detail': '모델 저장 중...'})
+        model_path = f"models/bug_rag_model_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        trainer.save_model(model_path)
 
         # 완료
-        module_status['rag_learning']['status'] = 'completed'
-        module_status['rag_learning']['process'] = None
-        module_status['rag_learning']['progress'] = {
-            'stage': '완료',
-            'current': 5,
-            'total': 5,
-            'message': f'RAG 학습이 성공적으로 완료되었습니다. ({processed_count}개 이슈 처리)'
+        socketio.emit('rag_progress', {'stage': 'complete', 'progress': 100, 'total': 100, 'detail': '학습 완료!'})
+
+        result = {
+            'success': True,
+            'message': f'Bug RAG 학습 완료! {len(documents)}개의 Bug 이슈로 학습했습니다.',
+            'model_path': model_path,
+            'bug_count': len(documents),
+            'documents_processed': len(documents)
         }
 
-        socketio.emit('rag_complete', {
-            'message': f'RAG 학습 완료! {processed_count}개 Jira 이슈로 학습했습니다.',
-            'processed_issues': processed_count,
-            'total_issues': issue_count
-        })
-
-        print(f"🎉 RAG 학습 완료! {processed_count}개 이슈 처리됨")
+        socketio.emit('rag_complete', result)
+        return result
 
     except Exception as e:
-        module_status['rag_learning']['status'] = 'failed'
-        module_status['rag_learning']['process'] = None
-        module_status['rag_learning']['progress'] = {
-            'stage': '실패',
-            'current': 0,
-            'total': 5,
+        error_result = {
+            'success': False,
             'message': f'RAG 학습 실패: {str(e)}'
         }
-
-        socketio.emit('rag_error', {
-            'message': f'RAG 학습 실패: {str(e)}'
-        })
-
-        print(f"❌ RAG 학습 실패: {e}")
+        socketio.emit('rag_error', error_result)
+        return error_result
 
 
 # 파일 모니터링 시작
@@ -688,7 +785,7 @@ def start_rag():
     try:
         data = request.get_json() or {}
         model_name = data.get('model_name', 'sentence-transformers/all-MiniLM-L6-v2')
-        max_results = data.get('max_results', 10)
+        max_results = data.get('max_results', 20)  # 기본값 20으로 변경
 
         if module_status['rag_learning']['process']:
             return jsonify({'error': 'RAG 학습이 이미 진행 중입니다'}), 400
@@ -704,10 +801,13 @@ def start_rag():
                 'error': 'RAG 학습 모듈이 설정되지 않았습니다. rag.trainer 모듈을 확인하세요.'
             }), 400
 
-        # 백그라운드에서 실제 RAG 학습 실행
+        # 🔥 수정: kwargs로 model_name과 max_results 모두 전달
         process = threading.Thread(
             target=rag_learning_process,
-            kwargs={'max_results': max_results},
+            kwargs={
+                'model_name': model_name,
+                'max_results': max_results
+            },
             daemon=True
         )
         process.start()
