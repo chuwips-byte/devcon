@@ -464,64 +464,122 @@ class JiraIntegration:
         else:
             return "Low"
 
-def search_issues(self, jql: str, startAt: int = 0, maxResults: int = 50) -> List:
-    """
-    JQL로 이슈 검색 (페이지네이션 지원)
+    def search_issues(self, jql: str, startAt: int = 0, maxResults: int = 50) -> List:
+        """
+        JQL로 이슈 검색 (페이지네이션 지원)
 
-    Args:
-        jql: JQL 쿼리 문자열
-        startAt: 시작 인덱스
-        maxResults: 최대 결과 수
+        Args:
+            jql: JQL 쿼리 문자열
+            startAt: 시작 인덱스
+            maxResults: 최대 결과 수
 
-    Returns:
-        이슈 목록
-    """
-    if not self.api_enabled:
-        print("❌ Jira API가 활성화되지 않았습니다.")
-        return []
-
-    try:
-        url = f"{self.jira_url}/rest/api/2/search"
-        params = {
-            "jql": jql,
-            "startAt": startAt,
-            "maxResults": maxResults
-        }
-
-        response = requests.get(
-            url,
-            auth=self.auth,
-            params=params,
-            timeout=30
-        )
-
-        if response.status_code == 200:
-            data = response.json()
-            issues = data.get("issues", [])
-
-            # Jira 응답을 객체로 변환 (fields 접근을 위해)
-            from types import SimpleNamespace
-
-            def dict_to_obj(d):
-                """딕셔너리를 객체로 변환"""
-                if isinstance(d, dict):
-                    return SimpleNamespace(**{k: dict_to_obj(v) for k, v in d.items()})
-                elif isinstance(d, list):
-                    return [dict_to_obj(item) for item in d]
-                else:
-                    return d
-
-            converted_issues = [dict_to_obj(issue) for issue in issues]
-            return converted_issues
-        else:
-            print(f"❌ Jira 검색 실패: HTTP {response.status_code}")
-            print(f"응답: {response.text}")
+        Returns:
+            이슈 목록
+        """
+        if not self.api_enabled:
+            print("❌ Jira API가 활성화되지 않았습니다.")
             return []
 
-    except Exception as e:
-        print(f"❌ Jira 검색 오류: {e}")
-        return []
+        try:
+            url = f"{self.jira_url}/rest/api/2/search"
+            params = {
+                "jql": jql,
+                "startAt": startAt,
+                "maxResults": maxResults
+            }
 
+            response = requests.get(
+                url,
+                auth=self.auth,
+                params=params,
+                timeout=30
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                issues = data.get("issues", [])
+
+                # Jira 응답을 객체로 변환 (fields 접근을 위해)
+                from types import SimpleNamespace
+
+                def dict_to_obj(d):
+                    """딕셔너리를 객체로 변환"""
+                    if isinstance(d, dict):
+                        return SimpleNamespace(**{k: dict_to_obj(v) for k, v in d.items()})
+                    elif isinstance(d, list):
+                        return [dict_to_obj(item) for item in d]
+                    else:
+                        return d
+
+                converted_issues = [dict_to_obj(issue) for issue in issues]
+                return converted_issues
+            else:
+                print(f"❌ Jira 검색 실패: HTTP {response.status_code}")
+                print(f"응답: {response.text}")
+                return []
+
+        except Exception as e:
+            print(f"❌ Jira 검색 오류: {e}")
+            return []
+
+    # jira_integration.py의 JiraIntegration 클래스 안에 추가
+
+    def fetch_bug_issues_for_rag(self, max_results: int = 20) -> dict:
+        """RAG 학습용 Bug 이슈 조회 (라벨 정보 포함)"""
+        if not self.api_enabled:
+            return {
+                'issues': [],
+                'total_found': 0,
+                'issue_keys': [],
+                'labels_summary': {}
+            }
+
+        print(f"\n🔍 Jira Bug 이슈 검색 중 (최대 {max_results}개)...")
+
+        jql = 'issuetype = Bug ORDER BY created DESC'
+
+        all_issues = []
+        labels_count = {}
+        start_at = 0
+        batch_size = 50
+
+        while len(all_issues) < max_results:
+            remaining = max_results - len(all_issues)
+            current_batch = min(batch_size, remaining)
+
+            issues_batch = self.search_issues(
+                jql=jql,
+                startAt=start_at,
+                maxResults=current_batch
+            )
+
+            if not issues_batch:
+                break
+
+            for issue in issues_batch:
+                all_issues.append(issue)
+
+                # 🔥 라벨 집계
+                if hasattr(issue.fields, 'labels') and issue.fields.labels:
+                    for label in issue.fields.labels:
+                        labels_count[label] = labels_count.get(label, 0) + 1
+
+                if len(all_issues) >= max_results:
+                    break
+
+            start_at += current_batch
+
+            if start_at > 1000:
+                break
+
+        issue_keys = [issue.key for issue in all_issues]
+
+        return {
+            'issues': all_issues,
+            'total_found': len(all_issues),
+            'issue_keys': issue_keys,
+            'labels_summary': labels_count
+        }
 # ==================== 테스트 함수 ====================
 
 def test_jira_integration():

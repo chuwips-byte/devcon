@@ -46,14 +46,21 @@ except ImportError as e:
     JIRA_AVAILABLE = False
     print(f"❌ Jira 연동 모듈 로드 실패: {e}")
 
-# RAG 학습 import
+# RAG Trainer import 추가
 try:
-    from rag.trainer import train_issue
+    from rag_trainer import RAGTrainer
     RAG_TRAINER_AVAILABLE = True
-    print("✅ RAG 학습 모듈 로드 성공")
+    print("✅ RAG Trainer 모듈 로드 성공")
 except ImportError as e:
     RAG_TRAINER_AVAILABLE = False
-    print(f"❌ RAG 학습 모듈 로드 실패: {e}")
+    print(f"❌ RAG Trainer 모듈 로드 실패: {e}")
+
+# RAG 학습 - Jira 연동과 RAG Trainer 둘 다 필요
+RAG_AVAILABLE = JIRA_AVAILABLE and RAG_TRAINER_AVAILABLE
+if RAG_AVAILABLE:
+    print("✅ RAG 학습 가능: Jira 연동 + RAG Trainer")
+else:
+    print("❌ RAG 학습 불가: Jira 연동 또는 RAG Trainer 필요")
 
 # Slack 연동 (선택사항)
 try:
@@ -88,7 +95,9 @@ dashboard_data = {
     'cluster_stats': defaultdict(int),
     'last_frequent_alert': {},
     'ssh_logs': deque(maxlen=500),
-    'ai_analyses': deque(maxlen=50)  # 🔥 AI 분석 결과 저장소
+    'ai_analyses': deque(maxlen=50),
+    'rag_training_history': deque(maxlen=10),  # 🔥 추가
+    'last_rag_result': None  # 🔥 추가
 }
 
 # 모듈 상태 추적
@@ -477,72 +486,25 @@ def rag_learning_process(model_name='sentence-transformers/all-MiniLM-L6-v2', ma
         if not JIRA_AVAILABLE:
             raise Exception("Jira 모듈을 사용할 수 없습니다")
 
-        if not RAG_TRAINER_AVAILABLE:
+        if not RAG_TRAINER_AVAILABLE:  # 이 부분 수정
             raise Exception("RAG Trainer 모듈을 사용할 수 없습니다")
 
         from jira_integration import JiraIntegration
-        from rag_trainer import RAGTrainer
 
         socketio.emit('rag_progress', {'stage': 'connecting', 'progress': 10, 'total': 100, 'detail': 'Jira 연결 중...'})
         jira = JiraIntegration()
 
         socketio.emit('rag_progress', {'stage': 'searching', 'progress': 20, 'total': 100, 'detail': 'Bug 이슈 검색 중...'})
 
-        bug_jql = 'issuetype = Bug ORDER BY created DESC'
-        all_issues = []
-        start_at = 0
-        batch_size = 50
+        bug_data = jira.fetch_bug_issues_for_rag(max_results=max_results)
+        all_issues = bug_data['issues']
+        issue_keys = bug_data['issue_keys']
+        labels_summary = bug_data['labels_summary']
 
-        print(f"\n🎯 목표: Bug 이슈 {max_results}개 수집")
-
-        while len(all_issues) < max_results:
-            remaining = max_results - len(all_issues)
-            current_batch_size = min(batch_size, remaining)
-
-            try:
-                issues_batch = jira.search_issues(
-                    jql=bug_jql,
-                    startAt=start_at,
-                    maxResults=current_batch_size
-                )
-
-                if not issues_batch:
-                    print(f"✅ 더 이상 Bug 이슈가 없습니다. 이 {len(all_issues)}개 수집됨")
-                    break
-
-                for issue in issues_batch:
-                    if len(all_issues) >= max_results:
-                        break
-
-                    issue_type = issue.fields.issuetype.name if hasattr(issue.fields, 'issuetype') else 'Unknown'
-
-                    if issue_type.lower() == 'bug':
-                        all_issues.append(issue)
-
-                        progress = 20 + (len(all_issues) / max_results) * 30
-                        socketio.emit('rag_progress', {
-                            'stage': 'collecting',
-                            'progress': int(progress),
-                            'total': 100,
-                            'detail': f'Bug 이슈 수집 중... ({len(all_issues)}/{max_results})'
-                        })
-
-                        print(f"  ✓ {issue.key} 수집 ({len(all_issues)}/{max_results})")
-
-                start_at += current_batch_size
-
-                if start_at > 1000:
-                    print(f"⚠️ 검색 한계 도달. Bug 이슈 {len(all_issues)}개만 수집됨")
-                    break
-
-            except Exception as e:
-                print(f"❌ 배치 수집 오류: {e}")
-                break
+        print(f"\n✅ {len(all_issues)}개의 Bug 이슈 수집 완료")
 
         if len(all_issues) == 0:
             raise Exception("Bug 타입의 이슈를 찾을 수 없습니다")
-
-        print(f"\n✅ 이 {len(all_issues)}개의 Bug 이슈 수집 완료")
 
         socketio.emit('rag_progress', {'stage': 'preprocessing', 'progress': 50, 'total': 100, 'detail': 'Bug 데이터 전처리 중...'})
 
@@ -576,7 +538,8 @@ def rag_learning_process(model_name='sentence-transformers/all-MiniLM-L6-v2', ma
                         'issue_key': issue.key,
                         'summary': issue.fields.summary,
                         'priority': issue.fields.priority.name if hasattr(issue.fields, 'priority') and issue.fields.priority else 'Unknown',
-                        'status': issue.fields.status.name if hasattr(issue.fields, 'status') and issue.fields.status else 'Unknown'
+                        'status': issue.fields.status.name if hasattr(issue.fields, 'status') and issue.fields.status else 'Unknown',
+                        'labels': issue.fields.labels if hasattr(issue.fields, 'labels') else []
                     }
                 })
 
@@ -610,23 +573,46 @@ def rag_learning_process(model_name='sentence-transformers/all-MiniLM-L6-v2', ma
 
         socketio.emit('rag_progress', {'stage': 'complete', 'progress': 100, 'total': 100, 'detail': '학습 완료!'})
 
+        # 🔥 timestamp 추가!
         result = {
             'success': True,
             'message': f'Bug RAG 학습 완료! {len(documents)}개의 Bug 이슈로 학습했습니다.',
             'model_path': model_path,
+            'model_name': model_name,  # 🔥 추가
             'bug_count': len(documents),
-            'documents_processed': len(documents)
+            'documents_processed': len(documents),
+            'issue_keys': issue_keys,
+            'labels_summary': labels_summary,
+            'top_labels': sorted(labels_summary.items(), key=lambda x: x[1], reverse=True)[:10],
+            'timestamp': datetime.now().isoformat()  # 🔥 추가!
         }
 
+        dashboard_data['last_rag_result'] = result
+        dashboard_data['rag_training_history'].append(result)
+
         socketio.emit('rag_complete', result)
+
+        # 🔥 학습 완료 후 상태 업데이트
+        module_status['rag_learning']['status'] = 'completed'
+        module_status['rag_learning']['process'] = None
+
         return result
 
     except Exception as e:
         error_result = {
             'success': False,
-            'message': f'RAG 학습 실패: {str(e)}'
+            'message': f'RAG 학습 실패: {str(e)}',
+            'timestamp': datetime.now().isoformat()  # 🔥 추가!
         }
+
+        dashboard_data['rag_training_history'].append(error_result)
+
         socketio.emit('rag_error', error_result)
+
+        # 🔥 실패 시 상태 업데이트
+        module_status['rag_learning']['status'] = 'failed'
+        module_status['rag_learning']['process'] = None
+
         return error_result
 
 
@@ -664,6 +650,13 @@ def get_stats():
         'cluster_count': len(dashboard_data['clusters']),
     })
 
+@app.route('/api/rag-history')
+def get_rag_history():
+    """RAG 학습 이력 조회 API"""
+    return jsonify({
+        'history': list(dashboard_data['rag_training_history']),
+        'last_result': dashboard_data['last_rag_result']
+    })
 
 @app.route('/api/clusters')
 def get_clusters():
@@ -843,7 +836,7 @@ def start_rag():
 
         if not RAG_TRAINER_AVAILABLE:
             return jsonify({
-                'error': 'RAG 학습 모듈이 설정되지 않았습니다. rag.trainer 모듈을 확인하세요.'
+                'error': 'RAG 학습 모듈이 설정되지 않았습니다. rag_trainer 모듈을 확인하세요.'
             }), 400
 
         process = threading.Thread(
@@ -1408,6 +1401,65 @@ def create_templates():
                 padding: 80px 10px 20px 10px;
             }
         }
+        
+        /* 진행률 표시 */
+        .progress-container {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 15px;
+            margin: 15px 0;
+        }
+        
+        /* 🔥 아래 CSS 추가 */
+        .label-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 10px;
+            padding: 8px;
+            background: white;
+            border-radius: 5px;
+            border-left: 4px solid #667eea;
+        }
+        
+        .label-name {
+            flex: 0 0 200px;
+            font-weight: 600;
+            color: #333;
+        }
+        
+        .label-bar-container {
+            flex: 1;
+            height: 20px;
+            background: #e9ecef;
+            border-radius: 10px;
+            overflow: hidden;
+            margin: 0 10px;
+        }
+        
+        .label-bar {
+            height: 100%;
+            background: linear-gradient(45deg, #667eea, #764ba2);
+            transition: width 0.5s ease;
+        }
+        
+        .label-count {
+            flex: 0 0 60px;
+            text-align: right;
+            font-weight: bold;
+            color: #667eea;
+        }
+        
+        .history-item {
+            padding: 15px;
+            margin: 10px 0;
+            background: #f8f9fa;
+            border-radius: 8px;
+            border-left: 4px solid #28a745;
+        }
+        
+        .history-item.failed {
+            border-left-color: #dc3545;
+        }
     </style>
 </head>
 <body>
@@ -1492,7 +1544,7 @@ def create_templates():
                 </div>
             </div>
 
-            <!-- RAG 학습 페이지 -->
+<!-- RAG 학습 페이지 -->
             <div class="page-content" id="rag-learning-page">
                 <div class="page-header">
                     <h1>🧠 RAG 학습</h1>
@@ -1532,6 +1584,46 @@ def create_templates():
                             <div class="progress-bar-fill" id="rag-progress-bar" style="width: 0%;"></div>
                         </div>
                         <div class="progress-text" id="rag-progress-text">준비 중...</div>
+                    </div>
+                </div>
+                
+                <!-- 🔥 학습 결과 패널 (새로 추가) -->
+                <div class="panel" id="rag-result-panel" style="display: none;">
+                    <h2>📊 마지막 학습 결과</h2>
+                    
+                    <div style="background: #e8f5e9; padding: 15px; border-radius: 8px; margin-bottom: 15px;">
+                        <div style="font-size: 1.1rem; font-weight: bold; color: #2e7d32; margin-bottom: 10px;">
+                            ✅ <span id="result-message">학습 완료</span>
+                        </div>
+                        <div style="font-size: 0.9rem; color: #666;">
+                            <strong>학습 시각:</strong> <span id="result-timestamp">-</span><br>
+                            <strong>모델:</strong> <span id="result-model">-</span><br>
+                            <strong>학습 이슈 수:</strong> <span id="result-count">0</span>개
+                        </div>
+                    </div>
+                    
+                    <!-- 학습된 이슈 목록 -->
+                    <div style="margin-bottom: 20px;">
+                        <h3 style="font-size: 1rem; margin-bottom: 10px;">📋 학습된 Bug 이슈</h3>
+                        <div id="trained-issues" style="max-height: 200px; overflow-y: auto; background: #f8f9fa; padding: 10px; border-radius: 8px; font-family: 'Courier New', monospace; font-size: 0.85rem;">
+                            이슈 목록이 표시됩니다...
+                        </div>
+                    </div>
+                    
+                    <!-- 🔥 라벨 분포 -->
+                    <div>
+                        <h3 style="font-size: 1rem; margin-bottom: 10px;">🏷️ Label 분포 (Top 10)</h3>
+                        <div id="labels-distribution" style="background: #f8f9fa; padding: 15px; border-radius: 8px;">
+                            라벨 분포가 표시됩니다...
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- 학습 이력 -->
+                <div class="panel">
+                    <h2>📜 학습 이력</h2>
+                    <div id="rag-history" style="max-height: 300px; overflow-y: auto;">
+                        <p style="color: #666;">아직 학습 이력이 없습니다.</p>
                     </div>
                 </div>
             </div>
@@ -1779,6 +1871,9 @@ def create_templates():
             showNotification(data.message);
             hideRAGProgress();
             updateModuleStatus();
+            
+            displayRAGResult(data);
+            updateRAGHistory();  // 🔥 이력 새로고침
         });
         
         socket.on('rag_error', function(data) {
@@ -1786,7 +1881,87 @@ def create_templates():
             showNotification(data.message, true);
             hideRAGProgress();
             updateModuleStatus();
+            updateRAGHistory();  // 🔥 실패 시에도 이력 새로고침
         });
+        
+        // 🔥 이 함수들을 stopRAG() 함수 아래에 추가
+        function displayRAGResult(result) {
+            const panel = document.getElementById('rag-result-panel');
+            panel.style.display = 'block';
+            
+            document.getElementById('result-message').textContent = result.message;
+            document.getElementById('result-timestamp').textContent = new Date().toLocaleString();
+            document.getElementById('result-model').textContent = result.model_path ? result.model_path.split('/').pop() : 'Unknown';
+            document.getElementById('result-count').textContent = result.bug_count || 0;
+            
+            // 이슈 목록
+            const issuesContainer = document.getElementById('trained-issues');
+            if (result.issue_keys && result.issue_keys.length > 0) {
+                issuesContainer.innerHTML = result.issue_keys.map(key => 
+                    `<div style="padding: 5px; border-bottom: 1px solid #dee2e6;">${key}</div>`
+                ).join('');
+            }
+            
+            // 라벨 분포
+            const labelsContainer = document.getElementById('labels-distribution');
+            if (result.top_labels && result.top_labels.length > 0) {
+                const maxCount = result.top_labels[0][1];
+                labelsContainer.innerHTML = result.top_labels.map(([label, count]) => {
+                    const percentage = (count / maxCount) * 100;
+                    return `
+                        <div class="label-item">
+                            <div class="label-name">${label}</div>
+                            <div class="label-bar-container">
+                                <div class="label-bar" style="width: ${percentage}%;"></div>
+                            </div>
+                            <div class="label-count">${count}개</div>
+                        </div>
+                    `;
+                }).join('');
+            }
+        }
+        
+        async function updateRAGHistory() {
+            try {
+                const response = await fetch('/api/rag-history');
+                const data = await response.json();
+                const container = document.getElementById('rag-history');
+                
+                if (!data.history || data.history.length === 0) {
+                    container.innerHTML = '<p style="color: #666;">아직 학습 이력이 없습니다.</p>';
+                    return;
+                }
+                
+                // 🔥 최신순 정렬 (reverse 사용)
+                const sortedHistory = [...data.history].reverse();
+                
+                container.innerHTML = sortedHistory.map(item => {
+                    const timestamp = item.timestamp ? new Date(item.timestamp).toLocaleString('ko-KR') : '알 수 없음';
+                    const isSuccess = item.success !== false;
+                    
+                    return `
+                        <div class="history-item ${isSuccess ? '' : 'failed'}">
+                            <div style="font-weight: bold; margin-bottom: 5px;">
+                                ${isSuccess ? '✅' : '❌'} ${timestamp}
+                            </div>
+                            <div style="font-size: 0.9rem; color: #666;">
+                                ${isSuccess ? `
+                                    모델: ${item.model_name || 'Unknown'}<br>
+                                    학습 이슈: ${item.bug_count || 0}개<br>
+                                    라벨 종류: ${Object.keys(item.labels_summary || {}).length}개
+                                ` : `
+                                    오류: ${item.message || '알 수 없는 오류'}
+                                `}
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+            } catch (error) {
+                console.error('학습 이력 조회 실패:', error);
+                document.getElementById('rag-history').innerHTML = 
+                    '<p style="color: #dc3545;">학습 이력 조회 중 오류가 발생했습니다.</p>';
+            }
+        }
         
         // 데이터 업데이트 함수들
         function updateStats() {
@@ -2128,6 +2303,7 @@ def create_templates():
         window.addEventListener('load', function() {
             updateModuleStatus();
             updateSystemInfo();
+            updateRAGHistory();  // 🔥 페이지 로드시 이력 로드
         });
     </script>
 </body>
