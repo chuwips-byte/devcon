@@ -1,7 +1,7 @@
 """
-파일명: 2_clustering_monitor.py
+파일명: clustering_monitor.py
 목적: Watchdog + Drain3를 이용한 실시간 로그 모니터링 (들여쓰기 수정)
-사용법: python 2_clustering_monitor.py
+사용법: python clustering_monitor.py
 """
 
 import os

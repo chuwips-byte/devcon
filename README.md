@@ -59,7 +59,7 @@ python main.py --mode dashboard # 웹 대시보드 실행 (브라우저에서 �
 
 # 직접 실행 방법 (개발/학습용)
 python 1_basic_drain3_test.py   # Drain3 기본 학습
-python 2_clustering_monitor.py  # 실시간 모니터링
+python clustering_monitor.py  # 실시간 모니터링
 python 3_log_generator.py       # 테스트 로그 생성
 python web_dashboard.py         # 웹 대시보드 직접 실행
 ```
