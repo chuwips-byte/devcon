@@ -810,6 +810,12 @@
             updateModuleStatus();
         });
         
+        socket.on('ai_analysis_complete', function(data) {
+            console.log('AI 분석 완료:', data);
+            updateClusters();
+            showNotification(`🤖 AI 분석 완료: ${data.template.substring(0, 50)}...`);
+        });
+        
         socket.on('ssh_log_update', function(data) {
             console.log('새 SSH 로그:', data);
             updateSSHLogs();
@@ -866,6 +872,24 @@
                             <div style="font-size: 0.8em; color: #666; margin-top: 5px;">
                                 마지막: ${new Date(cluster.last_seen).toLocaleString()}
                             </div>
+                            ${cluster.ai_analysis ? `
+                                <div style="margin-top: 10px; padding: 10px; background: #f0f8ff; border-radius: 5px; border-left: 3px solid #007bff;">
+                                    <div style="font-weight: bold; color: #007bff; margin-bottom: 5px;">
+                                        🤖 AI 분석 결과 (신뢰도: ${cluster.ai_analysis.confidence}%)
+                                    </div>
+                                    <div style="font-size: 0.85em;">
+                                        <div><strong>에러 유형:</strong> ${cluster.ai_analysis.error_type}</div>
+                                        <div><strong>심각도:</strong> ${cluster.ai_analysis.severity}</div>
+                                        <div><strong>근본 원인:</strong> ${cluster.ai_analysis.root_cause}</div>
+                                        <div style="margin-top: 5px;">
+                                            <strong>즉시 조치사항:</strong>
+                                            <ul style="margin: 2px 0; padding-left: 15px;">
+                                                ${cluster.ai_analysis.immediate_actions.map(action => `<li>${action}</li>`).join('')}
+                                            </ul>
+                                        </div>
+                                    </div>
+                                </div>
+                            ` : ''}
                         </div>
                     `).join('');
                 });

@@ -16,10 +16,11 @@ logger = logging.getLogger(__name__)
 
 class OllamaErrorAnalyzer:
     """Ollama를 사용한 에러 분석기"""
-    
+
     def __init__(self, 
                  ollama_url: str = "http://localhost:11434",
-                 model_name: str = "llama3:8b-instruct-q4_K_M",
+                 # 모델변경(★★)
+                 model_name: str = "",
                  timeout: int = 180):
         """
         Ollama 에러 분석기 초기화

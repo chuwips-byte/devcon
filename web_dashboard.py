@@ -260,7 +260,7 @@ class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else File
                     'last_seen': datetime.now().isoformat(),
                     'severity': '경미',
                     'recent_logs': deque(maxlen=10),
-                    'ai_analysis': None  # AI 분석 결과
+                    'ai_analysis': None
                 }
 
             cluster = dashboard_data['clusters'][cluster_id]
@@ -277,16 +277,19 @@ class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else File
             cluster_size = cluster['count']
             print(f"📊 발생 횟수: {cluster_size}번")
 
-            # 🔥 빈발 패턴 감지 (3회 이상, 5의 배수)
-            if cluster_size >= 3 and cluster_size % 5 == 0:
+            # 🔥 빈발 패턴 감지 (3회 이상)
+            if cluster_size >= 3:
                 print(f"⚠️  빈발 패턴 감지! {cluster_size}번 발생")
 
-                # 🔥 AI 분석 수행
+                # 🔥 AI 분석 수행 (있으면)
                 if self.ollama_analyzer and self.ollama_analyzer.enabled:
+                    print("🤖 AI 분석기 활성화됨 - AI 분석 시작")
                     self.perform_ai_analysis_for_web(cluster_id, cluster, error_line, template)
-
-                # Slack 알림
-                self.alert_frequent_error(error_line, template, cluster_size, cluster_id)
+                    # ↑ 여기서 AI 분석 + Slack 전송 (AI 포함)
+                else:
+                    print("💬 AI 분석기 비활성화 - 기본 알림만 전송")
+                    # AI 없이 기본 Slack 알림
+                    self.alert_frequent_error(error_line, template, cluster_size, cluster_id)
 
             # 🔥 Socket.IO로 클러스터 업데이트 전송
             try:
@@ -317,13 +320,35 @@ class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else File
         else:
             return '경미'
 
+    def alert_frequent_error(self, error_line, template, count, cluster_id):
+        """빈발 에러 Slack 알림 (AI 분석 없는 기본 버전)"""
+        try:
+            if self.slack_notifier and self.slack_notifier.enabled:
+                # 로그 예시 준비
+                examples = [
+                    {'text': error_line, 'timestamp': datetime.now().isoformat()}
+                ]
+
+                # 기본 Slack 알림 (AI 분석 없음)
+                self.slack_notifier.send_error_alert(
+                    template=template,
+                    count=count,
+                    cluster_id=cluster_id,
+                    examples=examples
+                )
+                print("✅ Slack 알림 (기본) 전송 완료")
+            else:
+                print("💬 Slack 비활성화 - 콘솔 출력만")
+        except Exception as e:
+            print(f"⚠️ Slack 알림 실패: {e}")
+
     def perform_ai_analysis_for_web(self, cluster_id, cluster, error_log, template):
         """🔥 웹 대시보드용 AI 분석 수행 (ollama_integration 사용)"""
         analysis_start_time = datetime.now().strftime("%H:%M:%S")
         print(f"🤖 웹 대시보드 AI 분석 시작: {template[:50]}... (시작시간: {analysis_start_time})")
 
         try:
-            # 🔥 OllamaErrorAnalyzer.analyze_error() 호출
+            # AI 분석 실행
             ai_analysis = self.ollama_analyzer.analyze_error(
                 error_log=error_log,
                 error_template=template,
@@ -337,21 +362,17 @@ class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else File
                 }
             )
 
-            # 클러스터에 AI 분석 결과 저장
+            # 클러스터에 저장
             cluster['ai_analysis'] = ai_analysis
-
-            # 전역 AI 분석 저장소에 추가
             dashboard_data['ai_analyses'].append({
                 'cluster_id': cluster_id,
                 'template': template,
                 'analysis': ai_analysis,
                 'timestamp': datetime.now().isoformat()
             })
-
-            # AI 분석기 상태 업데이트
             module_status['ai_analyzer']['last_analysis'] = datetime.now().isoformat()
 
-            # 콘솔에 AI 분석 결과 출력
+            # 콘솔 출력
             print(f"\n🧠 AI 분석 완료:")
             print(f"   에러 유형: {ai_analysis['error_type']}")
             print(f"   심각도: {ai_analysis['severity']}")
@@ -366,7 +387,27 @@ class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else File
             for i, solution in enumerate(ai_analysis['long_term_solutions'], 1):
                 print(f"   {i}. {solution}")
 
-            # 🔥 Socket.IO로 실시간 AI 분석 결과 전송
+            # 🔥 Slack에 AI 분석 포함해서 전송
+            try:
+                if self.slack_notifier and self.slack_notifier.enabled:
+                    # 로그 예시 준비
+                    examples = [
+                        {'text': error_log, 'timestamp': datetime.now().isoformat()}
+                    ]
+
+                    # AI 분석 포함 Slack 알림
+                    self.slack_notifier.send_error_alert_with_ai(
+                        template=template,
+                        count=cluster['count'],
+                        cluster_id=cluster_id,
+                        ai_analysis=ai_analysis,  # ✅ AI 분석 결과 포함!
+                        examples=examples
+                    )
+                    print("✅ Slack 알림 (AI 분석 포함) 전송 완료")
+            except Exception as e:
+                print(f"⚠️ Slack 알림 실패: {e}")
+
+            # Socket.IO 전송
             try:
                 socketio.emit('ai_analysis_complete', {
                     'cluster_id': cluster_id,
@@ -1714,6 +1755,12 @@ def create_templates():
             updateModuleStatus();
         });
         
+        socket.on('ai_analysis_complete', function(data) {
+            console.log('AI 분석 완료:', data);
+            updateClusters();
+            showNotification(`🤖 AI 분석 완료: ${data.template.substring(0, 50)}...`);
+        });
+        
         socket.on('ssh_log_update', function(data) {
             console.log('새 SSH 로그:', data);
             updateSSHLogs();
@@ -1770,6 +1817,24 @@ def create_templates():
                             <div style="font-size: 0.8em; color: #666; margin-top: 5px;">
                                 마지막: ${new Date(cluster.last_seen).toLocaleString()}
                             </div>
+                            ${cluster.ai_analysis ? `
+                                <div style="margin-top: 10px; padding: 10px; background: #f0f8ff; border-radius: 5px; border-left: 3px solid #007bff;">
+                                    <div style="font-weight: bold; color: #007bff; margin-bottom: 5px;">
+                                        🤖 AI 분석 결과 (신뢰도: ${cluster.ai_analysis.confidence}%)
+                                    </div>
+                                    <div style="font-size: 0.85em;">
+                                        <div><strong>에러 유형:</strong> ${cluster.ai_analysis.error_type}</div>
+                                        <div><strong>심각도:</strong> ${cluster.ai_analysis.severity}</div>
+                                        <div><strong>근본 원인:</strong> ${cluster.ai_analysis.root_cause}</div>
+                                        <div style="margin-top: 5px;">
+                                            <strong>즉시 조치사항:</strong>
+                                            <ul style="margin: 2px 0; padding-left: 15px;">
+                                                ${cluster.ai_analysis.immediate_actions.map(action => `<li>${action}</li>`).join('')}
+                                            </ul>
+                                        </div>
+                                    </div>
+                                </div>
+                            ` : ''}
                         </div>
                     `).join('');
                 });
