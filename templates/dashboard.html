@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Log Monitoring Dashboard</title>
+    <title>통합 모니터링 대시보드</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
@@ -15,33 +15,150 @@
         
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
+            background: #f5f5f5;
             color: #333;
+            overflow-x: hidden;
+        }
+        
+        /* 사이드바 스타일 */
+        .sidebar {
+            position: fixed;
+            left: 0;
+            top: 0;
+            width: 280px;
+            height: 100vh;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            z-index: 1000;
+            transform: translateX(-280px);
+            transition: transform 0.3s ease;
+            overflow-y: auto;
+        }
+        
+        .sidebar.active {
+            transform: translateX(0);
+        }
+        
+        .sidebar-header {
+            padding: 20px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .sidebar-header h2 {
+            font-size: 1.5rem;
+            margin-bottom: 5px;
+        }
+        
+        .sidebar-header p {
+            font-size: 0.9rem;
+            opacity: 0.8;
+        }
+        
+        .sidebar-menu {
+            padding: 20px 0;
+        }
+        
+        .menu-item {
+            display: block;
+            padding: 15px 20px;
+            color: white;
+            text-decoration: none;
+            transition: all 0.3s ease;
+            border-left: 4px solid transparent;
+        }
+        
+        .menu-item:hover, .menu-item.active {
+            background: rgba(255, 255, 255, 0.1);
+            border-left-color: #ffd700;
+        }
+        
+        .menu-item i {
+            margin-right: 10px;
+            font-size: 1.2rem;
+        }
+        
+        .menu-item .status-dot {
+            float: right;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-top: 4px;
+        }
+        
+        .status-running { background-color: #28a745; }
+        .status-stopped { background-color: #dc3545; }
+        .status-connected { background-color: #28a745; }
+        .status-disconnected { background-color: #dc3545; }
+        .status-training { background-color: #17a2b8; }
+        .status-completed { background-color: #28a745; }
+        .status-failed { background-color: #dc3545; }
+        
+        /* 햄버거 메뉴 버튼 */
+        .menu-toggle {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            z-index: 1001;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            cursor: pointer;
+            font-size: 1.5rem;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            transition: all 0.3s ease;
+        }
+        
+        .menu-toggle:hover {
+            transform: scale(1.1);
+        }
+        
+        /* 메인 콘텐츠 영역 */
+        .main-content {
+            margin-left: 0;
+            transition: margin-left 0.3s ease;
+            min-height: 100vh;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+        
+        .main-content.sidebar-open {
+            margin-left: 280px;
         }
         
         .container {
             max-width: 1400px;
             margin: 0 auto;
-            padding: 20px;
+            padding: 80px 20px 20px 20px;
         }
         
-        .header {
+        .page-header {
             text-align: center;
             color: white;
             margin-bottom: 30px;
         }
         
-        .header h1 {
+        .page-header h1 {
             font-size: 2.5em;
             margin-bottom: 10px;
         }
         
-        .header p {
+        .page-header p {
             font-size: 1.2em;
             opacity: 0.9;
         }
         
+        /* 페이지 콘텐츠 */
+        .page-content {
+            display: none;
+        }
+        
+        .page-content.active {
+            display: block;
+        }
+        
+        /* 통계 카드 */
         .stats-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
@@ -73,7 +190,8 @@
             color: #666;
         }
         
-        .main-content {
+        /* 패널 */
+        .main-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
             gap: 30px;
@@ -94,6 +212,7 @@
             padding-bottom: 10px;
         }
         
+        /* 로그 엔트리 */
         .log-entry {
             padding: 10px;
             margin: 5px 0;
@@ -123,6 +242,7 @@
             font-size: 0.9em;
         }
         
+        /* 클러스터 */
         .cluster-item {
             padding: 15px;
             margin: 10px 0;
@@ -158,158 +278,434 @@
             background: #f0f9ff;
         }
         
-        /* 🔥 AI 분석 결과 스타일 추가 */
-        .ai-analysis {
-            margin-top: 10px;
-            padding: 15px;
-            background: linear-gradient(135deg, #f0f8ff 0%, #e6f3ff 100%);
-            border-radius: 8px;
-            border-left: 4px solid #007bff;
-            box-shadow: 0 2px 8px rgba(0, 123, 255, 0.1);
+        /* 폼 요소 */
+        .form-group {
+            margin-bottom: 20px;
         }
         
-        .ai-analysis-header {
-            font-weight: bold;
-            color: #007bff;
-            margin-bottom: 10px;
-            font-size: 1em;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-        
-        .ai-analysis-content {
-            font-size: 0.85em;
-            line-height: 1.6;
-        }
-        
-        .ai-analysis-content > div {
-            margin: 8px 0;
-            padding: 5px 0;
-        }
-        
-        .ai-analysis-content strong {
-            color: #0056b3;
-            display: inline-block;
-            min-width: 100px;
-        }
-        
-        .ai-analysis-actions {
-            margin-top: 10px;
-            padding-top: 10px;
-            border-top: 1px solid rgba(0, 123, 255, 0.2);
-        }
-        
-        .ai-analysis-actions ul {
-            margin: 5px 0;
-            padding-left: 20px;
-        }
-        
-        .ai-analysis-actions li {
-            margin: 3px 0;
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
             color: #333;
         }
         
-        .confidence-badge {
-            display: inline-block;
-            padding: 2px 8px;
-            background: #007bff;
+        .form-group input, .form-group select {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            font-size: 1rem;
+            transition: border-color 0.3s ease;
+        }
+        
+        .form-group input:focus, .form-group select:focus {
+            border-color: #667eea;
+            outline: none;
+        }
+        
+        /* 버튼 */
+        .btn {
+            background: linear-gradient(45deg, #667eea, #764ba2);
             color: white;
-            border-radius: 12px;
-            font-size: 0.85em;
-            font-weight: normal;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1rem;
+            transition: all 0.3s ease;
+            margin: 5px;
         }
         
-        .status-indicator {
-            display: inline-block;
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            margin-right: 8px;
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
         }
         
-        .status-running {
-            background: #28a745;
-            animation: pulse 2s infinite;
+        .btn:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+            transform: none;
         }
         
-        @keyframes pulse {
-            0% { opacity: 1; }
-            50% { opacity: 0.5; }
-            100% { opacity: 1; }
+        .btn-danger {
+            background: linear-gradient(45deg, #dc3545, #c82333);
         }
         
-        .full-width {
-            grid-column: 1 / -1;
+        .btn-success {
+            background: linear-gradient(45deg, #28a745, #218838);
         }
         
+        /* 빠른 템플릿 스타일 */
+        .quick-template {
+            padding: 15px;
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            background: white;
+        }
+        
+        .quick-template:hover {
+            border-color: #667eea;
+            background: #f0f9ff;
+            transform: translateY(-2px);
+        }
+        
+        .quick-template h4 {
+            margin-bottom: 8px;
+            color: #333;
+        }
+        
+        .quick-template p {
+            color: #667eea;
+            font-weight: 600;
+            margin: 5px 0;
+        }
+        
+        .quick-template small {
+            color: #666;
+        }
+        
+        /* 차트 */
         .chart-container {
             position: relative;
             height: 300px;
             margin-top: 20px;
         }
         
+        .full-width {
+            grid-column: 1 / -1;
+        }
+        
+        /* 알림 */
+        .notification {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 15px 20px;
+            background: #28a745;
+            color: white;
+            border-radius: 8px;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+            transform: translateX(400px);
+            transition: transform 0.3s ease;
+            z-index: 1000;
+        }
+        
+        .notification.show {
+            transform: translateX(0);
+        }
+        
+        .notification.error {
+            background: #dc3545;
+        }
+        
+        /* 진행률 표시 */
+        .progress-container {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 15px;
+            margin: 15px 0;
+        }
+        
+        .progress-bar {
+            width: 100%;
+            height: 20px;
+            background: #e9ecef;
+            border-radius: 10px;
+            overflow: hidden;
+        }
+        
+        .progress-bar-fill {
+            height: 100%;
+            background: linear-gradient(45deg, #667eea, #764ba2);
+            transition: width 0.3s ease;
+        }
+        
+        .progress-text {
+            margin-top: 10px;
+            font-size: 0.9rem;
+            color: #666;
+        }
+        
+        /* 반응형 */
         @media (max-width: 768px) {
-            .main-content {
+            .main-grid {
                 grid-template-columns: 1fr;
             }
             
             .stats-grid {
                 grid-template-columns: 1fr;
             }
+            
+            .sidebar {
+                width: 250px;
+                transform: translateX(-250px);
+            }
+            
+            .main-content.sidebar-open {
+                margin-left: 250px;
+            }
+        }
+        
+        @media (max-width: 480px) {
+            .sidebar {
+                width: 100%;
+                transform: translateX(-100%);
+            }
+            
+            .main-content.sidebar-open {
+                margin-left: 0;
+            }
+            
+            .container {
+                padding: 80px 10px 20px 10px;
+            }
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>📊 Log Monitoring Dashboard</h1>
-            <p>실시간 로그 모니터링 및 AI 분석</p>
-            <p><span class="status-indicator status-running"></span>시스템 상태: <span id="system-status">실행 중</span></p>
+    <!-- 햄버거 메뉴 버튼 -->
+    <button class="menu-toggle" onclick="toggleSidebar()">☰</button>
+    
+    <!-- 사이드바 -->
+    <nav class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <h2>🎛️ 통합 대시보드</h2>
+            <p>모니터링 & 관리</p>
         </div>
-        
-        <div class="stats-grid">
-            <div class="stat-card">
-                <h3 id="total-logs">0</h3>
-                <p>총 로그 수</p>
-            </div>
-            <div class="stat-card">
-                <h3 id="error-logs">0</h3>
-                <p>에러 로그 수</p>
-            </div>
-            <div class="stat-card">
-                <h3 id="error-rate">0%</h3>
-                <p>에러율</p>
-            </div>
-            <div class="stat-card">
-                <h3 id="cluster-count">0</h3>
-                <p>발견된 패턴</p>
-            </div>
+        <div class="sidebar-menu">
+            <a href="#" class="menu-item active" onclick="showPage('log-monitoring')" data-page="log-monitoring">
+                📊 로그 모니터링
+                <span class="status-dot status-running" id="log-status-dot"></span>
+            </a>
+            <a href="#" class="menu-item" onclick="showPage('rag-learning')" data-page="rag-learning">
+                🧠 RAG 학습
+                <span class="status-dot status-stopped" id="rag-status-dot"></span>
+            </a>
+            <a href="#" class="menu-item" onclick="showPage('ssh-connection')" data-page="ssh-connection">
+                🔒 SSH 연결
+                <span class="status-dot status-disconnected" id="ssh-status-dot"></span>
+            </a>
+            <a href="#" class="menu-item" onclick="showPage('system-info')" data-page="system-info">
+                ⚙️ 시스템 정보
+            </a>
         </div>
-        
-        <div class="main-content">
-            <div class="panel">
-                <h2>📋 최근 로그</h2>
-                <div id="recent-logs">
-                    <p>로그를 기다리는 중...</p>
+    </nav>
+
+    <!-- 메인 콘텐츠 -->
+    <main class="main-content" id="main-content">
+        <div class="container">
+            <!-- 로그 모니터링 페이지 -->
+            <div class="page-content active" id="log-monitoring-page">
+                <div class="page-header">
+                    <h1>📊 로그 모니터링 대시보드</h1>
+                    <p>실시간 로그 클러스터링 및 에러 패턴 감지</p>
+                </div>
+                
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <h3 id="total-logs">0</h3>
+                        <p>총 로그 수</p>
+                    </div>
+                    <div class="stat-card">
+                        <h3 id="error-logs">0</h3>
+                        <p>에러 로그 수</p>
+                    </div>
+                    <div class="stat-card">
+                        <h3 id="error-rate">0%</h3>
+                        <p>에러율</p>
+                    </div>
+                    <div class="stat-card">
+                        <h3 id="cluster-count">0</h3>
+                        <p>발견된 패턴</p>
+                    </div>
+                </div>
+                
+                <div class="main-grid">
+                    <div class="panel">
+                        <h2>📋 최근 로그</h2>
+                        <div id="recent-logs">
+                            <p>로그를 기다리는 중...</p>
+                        </div>
+                    </div>
+                    
+                    <div class="panel">
+                        <h2>🏷️ 에러 패턴 클러스터</h2>
+                        <div id="clusters">
+                            <p>클러스터를 기다리는 중...</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="panel full-width">
+                    <h2>📈 에러 발생 타임라인</h2>
+                    <div class="chart-container">
+                        <canvas id="timeline-chart"></canvas>
+                    </div>
                 </div>
             </div>
-            
-            <div class="panel">
-                <h2>🏷️ 에러 패턴 클러스터 + 🤖 AI 분석</h2>
-                <div id="clusters">
-                    <p>클러스터를 기다리는 중...</p>
+
+            <!-- RAG 학습 페이지 -->
+            <div class="page-content" id="rag-learning-page">
+                <div class="page-header">
+                    <h1>🧠 RAG 학습</h1>
+                    <p>검색 증강 생성 모델 학습 및 관리 (Jira 연동)</p>
+                </div>
+                
+                <div class="panel">
+                    <h2>학습 설정</h2>
+
+                    <div class="form-group">
+                        <label>임베딩 모델:</label>
+                        <select id="rag-model">
+                            <option value="sentence-transformers/all-MiniLM-L6-v2">all-MiniLM-L6-v2 (빠름)</option>
+                            <option value="sentence-transformers/all-mpnet-base-v2">all-mpnet-base-v2 (고성능)</option>
+                            <option value="sentence-transformers/distilbert-base-nli-stsb-mean-tokens">distilbert (균형)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>최대 이슈 수:</label>
+                        <input type="number" id="rag-max-results" placeholder="10" value="10" min="1" max="100">
+                    </div>
+                    
+                    <div style="margin-top: 20px;">
+                        <button class="btn" id="start-rag-btn" onclick="startRAG()">학습 시작</button>
+                        <button class="btn btn-danger" id="stop-rag-btn" onclick="stopRAG()" disabled>학습 중지</button>
+                    </div>
+                    
+                    <div id="rag-info" style="margin-top: 15px; padding: 15px; background: #f8f9fa; border-radius: 8px; font-size: 0.9rem;">
+                        <strong>상태:</strong> <span id="rag-status-text">대기 중</span><br>
+                        <strong>Jira 연동:</strong> <span id="jira-status">❌ 확인 중...</span><br>
+                        <strong>RAG 모듈:</strong> <span id="trainer-status">❌ 확인 중...</span>
+                    </div>
+                    
+                    <!-- 진행률 표시 -->
+                    <div id="rag-progress-container" class="progress-container" style="display: none;">
+                        <div class="progress-bar">
+                            <div class="progress-bar-fill" id="rag-progress-bar" style="width: 0%;"></div>
+                        </div>
+                        <div class="progress-text" id="rag-progress-text">준비 중...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- SSH 연결 페이지 -->
+            <div class="page-content" id="ssh-connection-page">
+                <div class="page-header">
+                    <h1>🔒 SSH 연결</h1>
+                    <p>원격 서버 연결 및 로그 모니터링</p>
+                </div>
+                
+                <div class="main-grid">
+                    <div class="panel">
+                        <h2>연결 설정</h2>
+                        <div class="form-group">
+                            <label>호스트 주소:</label>
+                            <input type="text" id="ssh-host" placeholder="예: 192.168.1.100" value="localhost">
+                        </div>
+                        <div class="form-group">
+                            <label>사용자명:</label>
+                            <input type="text" id="ssh-username" placeholder="사용자명" value="user">
+                        </div>
+                        <div class="form-group">
+                            <label>비밀번호:</label>
+                            <input type="password" id="ssh-password" placeholder="비밀번호">
+                        </div>
+                        <div class="form-group">
+                            <label>로그 파일 경로:</label>
+                            <input type="text" id="ssh-log-path" placeholder="/var/log/application.log" value="/var/log/application.log">
+                            <small style="color: #666; font-size: 0.9em; display: block; margin-top: 5px;">
+                                📁 일반적인 로그 경로 예시:<br>
+                                • Tomcat: /opt/tomcat/logs/catalina.out<br>
+                                • Apache: /var/log/apache2/access.log<br>
+                                • Nginx: /var/log/nginx/error.log<br>
+                                • 시스템: /var/log/syslog<br>
+                                • 애플리케이션: /var/log/myapp/app.log
+                            </small>
+                        </div>
+                        <div style="margin-top: 20px;">
+                            <button class="btn" id="start-ssh-btn" onclick="startSSH()">연결 & 모니터링 시작</button>
+                            <button class="btn btn-danger" id="stop-ssh-btn" onclick="stopSSH()" disabled>연결 해제</button>
+                        </div>
+                        <div id="ssh-info" style="margin-top: 15px; padding: 15px; background: #f8f9fa; border-radius: 8px; font-size: 0.9rem;">
+                            <strong>상태:</strong> <span id="ssh-status-text">연결 해제됨</span><br>
+                            <strong>로그 파일:</strong> <span id="ssh-log-file">-</span>
+                        </div>
+                    </div>
+                    
+                    <div class="panel">
+                        <h2>📋 SSH 로그 (실시간)</h2>
+                        <div id="ssh-logs" style="height: 400px; overflow-y: auto; background: #f8f9fa; padding: 15px; border-radius: 8px; font-family: 'Courier New', monospace; font-size: 0.9em;">
+                            <p style="color: #666;">SSH 연결 후 실시간 로그가 여기에 표시됩니다...</p>
+                        </div>
+                        <div style="margin-top: 10px;">
+                            <button class="btn" onclick="clearSSHLogs()" style="background: #6c757d;">로그 지우기</button>
+                            <button class="btn" onclick="downloadSSHLogs()" style="background: #17a2b8;">로그 다운로드</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 빠른 연결 템플릿 -->
+                <div class="panel full-width">
+                    <h2>🚀 빠른 연결 템플릿</h2>
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 15px;">
+                        <div class="quick-template" onclick="loadTemplate('tomcat')">
+                            <h4>🍅 Tomcat 서버</h4>
+                            <p>로그: /opt/tomcat/logs/catalina.out</p>
+                            <small>포트: 22, 사용자: tomcat</small>
+                        </div>
+                        <div class="quick-template" onclick="loadTemplate('apache')">
+                            <h4>🌐 Apache 서버</h4>
+                            <p>로그: /var/log/apache2/error.log</p>
+                            <small>포트: 22, 사용자: www-data</small>
+                        </div>
+                        <div class="quick-template" onclick="loadTemplate('nginx')">
+                            <h4>⚡ Nginx 서버</h4>
+                            <p>로그: /var/log/nginx/error.log</p>
+                            <small>포트: 22, 사용자: nginx</small>
+                        </div>
+                        <div class="quick-template" onclick="loadTemplate('system')">
+                            <h4>🖥️ 시스템 로그</h4>
+                            <p>로그: /var/log/syslog</p>
+                            <small>포트: 22, 사용자: root</small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 시스템 정보 페이지 -->
+            <div class="page-content" id="system-info-page">
+                <div class="page-header">
+                    <h1>⚙️ 시스템 정보</h1>
+                    <p>서버 리소스 모니터링</p>
+                </div>
+                
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <h3 id="cpu-usage">0%</h3>
+                        <p>CPU 사용률</p>
+                    </div>
+                    <div class="stat-card">
+                        <h3 id="memory-usage">0%</h3>
+                        <p>메모리 사용률</p>
+                    </div>
+                    <div class="stat-card">
+                        <h3 id="disk-usage">0%</h3>
+                        <p>디스크 사용률</p>
+                    </div>
+                    <div class="stat-card">
+                        <h3 id="process-count">0</h3>
+                        <p>활성 프로세스</p>
+                    </div>
                 </div>
             </div>
         </div>
-        
-        <div class="panel full-width">
-            <h2>📈 에러 발생 타임라인</h2>
-            <div class="chart-container">
-                <canvas id="timeline-chart"></canvas>
-            </div>
-        </div>
-    </div>
+    </main>
+
+    <!-- 알림 -->
+    <div class="notification" id="notification"></div>
 
     <script>
         // Socket.IO 연결
@@ -346,6 +742,64 @@
             }
         });
         
+        // 사이드바 토글
+        function toggleSidebar() {
+            const sidebar = document.getElementById('sidebar');
+            const mainContent = document.getElementById('main-content');
+            
+            sidebar.classList.toggle('active');
+            mainContent.classList.toggle('sidebar-open');
+        }
+        
+        // 페이지 전환
+        function showPage(pageName) {
+            // 모든 페이지 숨기기
+            const pages = document.querySelectorAll('.page-content');
+            pages.forEach(page => page.classList.remove('active'));
+            
+            // 선택된 페이지 표시
+            document.getElementById(pageName + '-page').classList.add('active');
+            
+            // 메뉴 활성화 상태 변경
+            const menuItems = document.querySelectorAll('.menu-item');
+            menuItems.forEach(item => item.classList.remove('active'));
+            document.querySelector(`[data-page="${pageName}"]`).classList.add('active');
+            
+            // 모바일에서는 사이드바 자동 닫기
+            if (window.innerWidth <= 768) {
+                toggleSidebar();
+            }
+        }
+        
+        // 빠른 템플릿 로드
+        function loadTemplate(type) {
+            const templates = {
+                'tomcat': {
+                    username: 'tomcat',
+                    log_path: '/opt/tomcat/logs/catalina.out'
+                },
+                'apache': {
+                    username: 'www-data', 
+                    log_path: '/var/log/apache2/error.log'
+                },
+                'nginx': {
+                    username: 'nginx',
+                    log_path: '/var/log/nginx/error.log'
+                },
+                'system': {
+                    username: 'root',
+                    log_path: '/var/log/syslog'
+                }
+            };
+            
+            const template = templates[type];
+            if (template) {
+                document.getElementById('ssh-username').value = template.username;
+                document.getElementById('ssh-log-path').value = template.log_path;
+                showNotification(`${type.toUpperCase()} 템플릿 로드됨`);
+            }
+        }
+        
         // Socket 이벤트 처리
         socket.on('connect', function() {
             console.log('대시보드에 연결됨');
@@ -353,23 +807,34 @@
             updateClusters();
             updateRecentLogs();
             updateTimeline();
+            updateModuleStatus();
         });
         
-        socket.on('cluster_update', function(data) {
-            console.log('클러스터 업데이트:', data);
-            updateClusters();
+        socket.on('ssh_log_update', function(data) {
+            console.log('새 SSH 로그:', data);
+            updateSSHLogs();
         });
         
-        socket.on('ai_analysis_complete', function(data) {
-            console.log('🤖 AI 분석 완료:', data);
-            updateClusters();
-            showNotification(`AI 분석 완료: ${data.analysis.error_type} (신뢰도: ${data.analysis.confidence}%)`);
+        socket.on('rag_progress', function(data) {
+            console.log('RAG 진행상황:', data);
+            updateRAGProgress(data.stage, data.progress, data.total);
+            if (data.detail) {
+                document.getElementById('rag-progress-text').textContent += ` - ${data.detail}`;
+            }
         });
         
-        socket.on('new_error_log', function(data) {
-            console.log('새 에러:', data);
-            updateStats();
-            updateRecentLogs();
+        socket.on('rag_complete', function(data) {
+            console.log('RAG 완료:', data);
+            showNotification(data.message);
+            hideRAGProgress();
+            updateModuleStatus();
+        });
+        
+        socket.on('rag_error', function(data) {
+            console.log('RAG 에러:', data);
+            showNotification(data.message, true);
+            hideRAGProgress();
+            updateModuleStatus();
         });
         
         // 데이터 업데이트 함수들
@@ -401,33 +866,6 @@
                             <div style="font-size: 0.8em; color: #666; margin-top: 5px;">
                                 마지막: ${new Date(cluster.last_seen).toLocaleString()}
                             </div>
-                            ${cluster.ai_analysis ? `
-                                <div class="ai-analysis">
-                                    <div class="ai-analysis-header">
-                                        🤖 AI 분석 결과 
-                                        <span class="confidence-badge">신뢰도: ${cluster.ai_analysis.confidence}%</span>
-                                    </div>
-                                    <div class="ai-analysis-content">
-                                        <div><strong>에러 유형:</strong> ${cluster.ai_analysis.error_type}</div>
-                                        <div><strong>심각도:</strong> ${cluster.ai_analysis.severity}</div>
-                                        <div><strong>근본 원인:</strong> ${cluster.ai_analysis.root_cause}</div>
-                                        <div class="ai-analysis-actions">
-                                            <strong>⚡ 즉시 조치사항:</strong>
-                                            <ul>
-                                                ${cluster.ai_analysis.immediate_actions.map(action => `<li>${action}</li>`).join('')}
-                                            </ul>
-                                        </div>
-                                        ${cluster.ai_analysis.long_term_solutions && cluster.ai_analysis.long_term_solutions.length > 0 ? `
-                                            <div class="ai-analysis-actions">
-                                                <strong>🔧 장기적 해결방안:</strong>
-                                                <ul>
-                                                    ${cluster.ai_analysis.long_term_solutions.map(solution => `<li>${solution}</li>`).join('')}
-                                                </ul>
-                                            </div>
-                                        ` : ''}
-                                    </div>
-                                </div>
-                            ` : ''}
                         </div>
                     `).join('');
                 });
@@ -452,6 +890,28 @@
                 });
         }
         
+        function updateSSHLogs() {
+            fetch('/api/ssh-logs')
+                .then(response => response.json())
+                .then(data => {
+                    const container = document.getElementById('ssh-logs');
+                    if (data.length === 0) {
+                        container.innerHTML = '<p style="color: #666;">SSH 연결 후 실시간 로그가 여기에 표시됩니다...</p>';
+                        return;
+                    }
+                    
+                    container.innerHTML = data.slice(-50).reverse().map(log => `
+                        <div class="log-entry ${log.type}">
+                            <div class="log-timestamp">${new Date(log.timestamp).toLocaleString()}</div>
+                            <div class="log-content">${log.content}</div>
+                        </div>
+                    `).join('');
+                    
+                    // 자동 스크롤
+                    container.scrollTop = 0;
+                });
+        }
+        
         function updateTimeline() {
             fetch('/api/error-timeline')
                 .then(response => response.json())
@@ -465,6 +925,81 @@
                 });
         }
         
+        function updateModuleStatus() {
+            fetch('/api/module-status')
+                .then(response => response.json())
+                .then(data => {
+                    // 상태 점 업데이트
+                    updateStatusDot('log-status-dot', 'running');
+                    updateStatusDot('rag-status-dot', data.rag_learning.status);
+                    updateStatusDot('ssh-status-dot', data.ssh_connection.status);
+                    
+                    // 상태 텍스트 업데이트
+                    updateStatusText('rag-status-text', data.rag_learning.status);
+                    updateStatusText('ssh-status-text', data.ssh_connection.status);
+                    
+                    // RAG 모듈 상태 업데이트
+                    document.getElementById('jira-status').textContent = data.rag_learning.jira_available ? '✅ 사용 가능' : '❌ 설정 필요';
+                    document.getElementById('trainer-status').textContent = data.rag_learning.trainer_available ? '✅ 사용 가능' : '❌ 설정 필요';
+                    
+                    // SSH 로그 파일 정보 업데이트
+                    if (data.ssh_connection.log_path) {
+                        document.getElementById('ssh-log-file').textContent = data.ssh_connection.log_path;
+                    }
+                    
+                    // 버튼 상태 업데이트
+                    updateButtons(data);
+                });
+        }
+        
+        function updateStatusDot(dotId, status) {
+            const dot = document.getElementById(dotId);
+            dot.className = `status-dot status-${status}`;
+        }
+        
+        function updateStatusText(textId, status) {
+            const text = document.getElementById(textId);
+            const statusMap = {
+                'running': '실행 중',
+                'stopped': '중지됨',
+                'connected': '연결됨',
+                'disconnected': '연결 해제됨',
+                'training': '학습 중',
+                'completed': '완료됨',
+                'failed': '실패'
+            };
+            text.textContent = statusMap[status] || status;
+        }
+        
+        function updateButtons(moduleStatus) {
+            // RAG 버튼
+            const startRagBtn = document.getElementById('start-rag-btn');
+            const stopRagBtn = document.getElementById('stop-rag-btn');
+            const ragStatus = moduleStatus.rag_learning.status;
+            
+            startRagBtn.disabled = ragStatus === 'training';
+            stopRagBtn.disabled = ragStatus !== 'training';
+            
+            // SSH 버튼
+            const startSshBtn = document.getElementById('start-ssh-btn');
+            const stopSshBtn = document.getElementById('stop-ssh-btn');
+            const sshStatus = moduleStatus.ssh_connection.status;
+            
+            startSshBtn.disabled = sshStatus === 'connected' || sshStatus === 'connecting';
+            stopSshBtn.disabled = sshStatus === 'disconnected';
+        }
+        
+        function updateSystemInfo() {
+            fetch('/api/system-info')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('cpu-usage').textContent = data.cpu_percent + '%';
+                    document.getElementById('memory-usage').textContent = data.memory_percent + '%';
+                    document.getElementById('disk-usage').textContent = data.disk_usage + '%';
+                    document.getElementById('process-count').textContent = data.active_processes;
+                });
+        }
+        
         function getSeverityClass(severity) {
             switch(severity) {
                 case '매우 심각': return 'critical';
@@ -474,26 +1009,139 @@
             }
         }
         
-        function showNotification(message) {
-            const notification = document.createElement('div');
-            notification.style.cssText = `
-                position: fixed;
-                top: 20px;
-                right: 20px;
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                color: white;
-                padding: 15px 20px;
-                border-radius: 8px;
-                box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-                z-index: 1000;
-                animation: slideIn 0.3s ease;
-            `;
+        function showNotification(message, isError = false) {
+            const notification = document.getElementById('notification');
             notification.textContent = message;
-            document.body.appendChild(notification);
+            notification.className = `notification ${isError ? 'error' : ''} show`;
             
             setTimeout(() => {
-                notification.remove();
+                notification.classList.remove('show');
             }, 5000);
+        }
+        
+        // RAG 진행률 표시 함수들
+        function updateRAGProgress(stage, current, total) {
+            const container = document.getElementById('rag-progress-container');
+            const bar = document.getElementById('rag-progress-bar');
+            const text = document.getElementById('rag-progress-text');
+            
+            container.style.display = 'block';
+            const percentage = (current / total) * 100;
+            bar.style.width = percentage + '%';
+            text.textContent = `${stage} (${current}/${total}) - ${percentage.toFixed(0)}%`;
+        }
+        
+        function hideRAGProgress() {
+            const container = document.getElementById('rag-progress-container');
+            container.style.display = 'none';
+        }
+        
+        // SSH 기능들
+        async function startSSH() {
+            try {
+                const host = document.getElementById('ssh-host').value;
+                const username = document.getElementById('ssh-username').value;
+                const password = document.getElementById('ssh-password').value;
+                const log_path = document.getElementById('ssh-log-path').value;
+                
+                if (!host || !username || !log_path) {
+                    showNotification('호스트, 사용자명, 로그 경로를 모두 입력하세요', true);
+                    return;
+                }
+                
+                const response = await fetch('/api/start-ssh', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ host, username, password, log_path })
+                });
+                const data = await response.json();
+                
+                if (response.ok) {
+                    showNotification(data.message);
+                    document.getElementById('ssh-log-file').textContent = data.log_path;
+                    
+                    // SSH 로그 컨테이너 초기화
+                    document.getElementById('ssh-logs').innerHTML = '<p style="color: #28a745;">🔍 실시간 로그 모니터링 시작...</p>';
+                } else {
+                    showNotification(data.error, true);
+                }
+            } catch (error) {
+                showNotification('SSH 연결 실패: ' + error.message, true);
+            }
+        }
+        
+        async function stopSSH() {
+            try {
+                const response = await fetch('/api/stop-ssh', { method: 'POST' });
+                const data = await response.json();
+                
+                if (response.ok) {
+                    showNotification(data.message);
+                    document.getElementById('ssh-log-file').textContent = '-';
+                    document.getElementById('ssh-logs').innerHTML = '<p style="color: #666;">SSH 연결 후 실시간 로그가 여기에 표시됩니다...</p>';
+                } else {
+                    showNotification(data.error, true);
+                }
+            } catch (error) {
+                showNotification('SSH 연결 해제 실패: ' + error.message, true);
+            }
+        }
+        
+        function clearSSHLogs() {
+            document.getElementById('ssh-logs').innerHTML = '<p style="color: #666;">로그가 지워졌습니다.</p>';
+        }
+        
+        function downloadSSHLogs() {
+            const logs = document.getElementById('ssh-logs').textContent;
+            const blob = new Blob([logs], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `ssh-logs-${new Date().toISOString().split('T')[0]}.txt`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            showNotification('SSH 로그 다운로드 완료');
+        }
+        
+        // RAG 기능들
+        async function startRAG() {
+            try {
+                const model_name = document.getElementById('rag-model').value || 'sentence-transformers/all-MiniLM-L6-v2';
+                const max_results = parseInt(document.getElementById('rag-max-results').value) || 5;
+                
+                const response = await fetch('/api/start-rag', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ model_name, max_results })
+                });
+                const data = await response.json();
+                
+                if (response.ok) {
+                    showNotification(data.message);
+                } else {
+                    showNotification(data.error, true);
+                }
+            } catch (error) {
+                showNotification('RAG 학습 시작 실패: ' + error.message, true);
+            }
+        }
+        
+        async function stopRAG() {
+            try {
+                const response = await fetch('/api/stop-rag', { method: 'POST' });
+                const data = await response.json();
+                
+                if (response.ok) {
+                    showNotification(data.message);
+                    hideRAGProgress();
+                } else {
+                    showNotification(data.error, true);
+                }
+            } catch (error) {
+                showNotification('RAG 학습 중지 실패: ' + error.message, true);
+            }
         }
         
         // 주기적 업데이트
@@ -501,18 +1149,17 @@
             updateStats();
             updateClusters();
             updateRecentLogs();
+            updateSSHLogs();
             updateTimeline();
+            updateModuleStatus();
+            updateSystemInfo();
         }, 5000);
         
-        // CSS 애니메이션 추가
-        const style = document.createElement('style');
-        style.textContent = `
-            @keyframes slideIn {
-                from { transform: translateX(100%); opacity: 0; }
-                to { transform: translateX(0); opacity: 1; }
-            }
-        `;
-        document.head.appendChild(style);
+        // 페이지 로드시 초기화
+        window.addEventListener('load', function() {
+            updateModuleStatus();
+            updateSystemInfo();
+        });
     </script>
 </body>
 </html>
