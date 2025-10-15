@@ -20,7 +20,7 @@ class OllamaErrorAnalyzer:
     def __init__(self, 
                  ollama_url: str = "http://localhost:11434",
                  # 모델변경(★★)
-                 model_name: str = "",
+                 model_name: str = "mistral:latest",
                  timeout: int = 180):
         """
         Ollama 에러 분석기 초기화
