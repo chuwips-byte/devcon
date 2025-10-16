@@ -569,7 +569,24 @@ def rag_learning_process(model_name='sentence-transformers/all-MiniLM-L6-v2', ma
 
         socketio.emit('rag_progress', {'stage': 'saving', 'progress': 90, 'total': 100, 'detail': '모델 저장 중...'})
         model_path = f"models/bug_rag_model_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        trainer.save_model(model_path)
+        # 모델 저장 및 학습 결과 반환
+        result = trainer.save_model(model_path)
+
+        # 학습 완료 후 프론트로 전송
+        socketio.emit('rag_complete', {
+            'success': True,
+            'message': f'✅ Bug RAG 학습 완료! {result["issue_count"]}개 이슈 학습됨',
+            'issue_keys': result["issue_keys"],
+            'issue_count': result["issue_count"]
+        })
+
+        # 학습 완료 후 클라이언트에 알림 전송
+        socketio.emit('rag_complete', {
+            'success': True,
+            'message': f'✅ Bug RAG 학습 완료! {result["issue_count"]}개 이슈 학습됨',
+            'issue_keys': result["issue_keys"],
+            'issue_count': result["issue_count"]
+        })
 
         socketio.emit('rag_progress', {'stage': 'complete', 'progress': 100, 'total': 100, 'detail': '학습 완료!'})
 
@@ -652,10 +669,11 @@ def get_stats():
 
 @app.route('/api/rag-history')
 def get_rag_history():
-    """RAG 학습 이력 조회 API"""
+    last = dashboard_data['last_rag_result']
     return jsonify({
         'history': list(dashboard_data['rag_training_history']),
-        'last_result': dashboard_data['last_rag_result']
+        'last_result': last,
+        'issue_keys': last.get('issue_keys', [])  # 🔥 추가
     })
 
 @app.route('/api/clusters')
@@ -1326,7 +1344,7 @@ def create_templates():
             color: white;
             border-radius: 8px;
             box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
-            transform: translateX(400px);
+            transform: translateX(120%);
             transition: transform 0.3s ease;
             z-index: 1000;
         }
@@ -1608,6 +1626,7 @@ def create_templates():
                         <div id="trained-issues" style="max-height: 200px; overflow-y: auto; background: #f8f9fa; padding: 10px; border-radius: 8px; font-family: 'Courier New', monospace; font-size: 0.85rem;">
                             이슈 목록이 표시됩니다...
                         </div>
+                        <div id="trained-issues"></div>
                     </div>
                     
                     <!-- 🔥 라벨 분포 -->
@@ -1949,6 +1968,21 @@ def create_templates():
                                     모델: ${item.model_name || 'Unknown'}<br>
                                     학습 이슈: ${item.bug_count || 0}개<br>
                                     라벨 종류: ${Object.keys(item.labels_summary || {}).length}개
+                                    ${Array.isArray(item.issue_keys) && item.issue_keys.length > 0
+                                        ? `
+                                          <div style="margin-top:8px;">
+                                            <strong>이슈 키 (${item.issue_keys.length}개):</strong>
+                                            <div style="max-height:140px; overflow:auto; background:#f8f9fa; border:1px solid #dee2e6; border-radius:6px; padding:6px; font-family:'Courier New', monospace; font-size:0.85rem;">
+                                              ${item.issue_keys.slice(0, 10).map(k =>
+                                                `<div style="padding:2px 4px; border-bottom:1px solid #eee;">${k}</div>`
+                                              ).join('')}
+                                              ${item.issue_keys.length > 10
+                                                ? `<div style="padding:6px; color:#667eea; font-weight:600;">+ ${item.issue_keys.length - 10} more</div>`
+                                                : ''}
+                                            </div>
+                                          </div>`
+                                        : `<div style="margin-top:8px; color:#aaa;">이슈 키 없음</div>`
+                                      }
                                 ` : `
                                     오류: ${item.message || '알 수 없는 오류'}
                                 `}

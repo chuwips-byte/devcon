@@ -193,6 +193,11 @@ class RAGTrainer:
             print(f"✅ 메타데이터 저장: {metadata_path}")
 
             print(f"\n✅ 모델 전체 저장 완료: {path}")
+            return {
+                "model_path": path,
+                "issue_keys": [doc.get('id') for doc in self.documents if doc.get('id')],
+                "issue_count": len(self.documents)
+            }
 
         except Exception as e:
             print(f"❌ 모델 저장 실패: {e}")

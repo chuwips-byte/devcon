@@ -388,7 +388,7 @@
             color: white;
             border-radius: 8px;
             box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
-            transform: translateX(400px);
+            transform: translateX(120%);
             transition: transform 0.3s ease;
             z-index: 1000;
         }
@@ -670,6 +670,7 @@
                         <div id="trained-issues" style="max-height: 200px; overflow-y: auto; background: #f8f9fa; padding: 10px; border-radius: 8px; font-family: 'Courier New', monospace; font-size: 0.85rem;">
                             이슈 목록이 표시됩니다...
                         </div>
+                        <div id="trained-issues"></div>
                     </div>
                     
                     <!-- 🔥 라벨 분포 -->
@@ -1011,6 +1012,21 @@
                                     모델: ${item.model_name || 'Unknown'}<br>
                                     학습 이슈: ${item.bug_count || 0}개<br>
                                     라벨 종류: ${Object.keys(item.labels_summary || {}).length}개
+                                    ${Array.isArray(item.issue_keys) && item.issue_keys.length > 0
+                                        ? `
+                                          <div style="margin-top:8px;">
+                                            <strong>이슈 키 (${item.issue_keys.length}개):</strong>
+                                            <div style="max-height:140px; overflow:auto; background:#f8f9fa; border:1px solid #dee2e6; border-radius:6px; padding:6px; font-family:'Courier New', monospace; font-size:0.85rem;">
+                                              ${item.issue_keys.slice(0, 10).map(k =>
+                                                `<div style="padding:2px 4px; border-bottom:1px solid #eee;">${k}</div>`
+                                              ).join('')}
+                                              ${item.issue_keys.length > 10
+                                                ? `<div style="padding:6px; color:#667eea; font-weight:600;">+ ${item.issue_keys.length - 10} more</div>`
+                                                : ''}
+                                            </div>
+                                          </div>`
+                                        : `<div style="margin-top:8px; color:#aaa;">이슈 키 없음</div>`
+                                      }
                                 ` : `
                                     오류: ${item.message || '알 수 없는 오류'}
                                 `}
