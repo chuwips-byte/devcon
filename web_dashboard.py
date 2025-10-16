@@ -8,14 +8,11 @@
 # 필수 라이브러리 import
 from flask import Flask, render_template, jsonify, request
 from flask_socketio import SocketIO, emit
-import json
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from collections import defaultdict, deque
 import os
-import sys
-import subprocess
 import psutil
 import paramiko
 
@@ -46,7 +43,7 @@ except ImportError as e:
     JIRA_AVAILABLE = False
     print(f"❌ Jira 연동 모듈 로드 실패: {e}")
 
-# RAG Trainer import 추가
+# RAG Trainer import
 try:
     from rag_trainer import RAGTrainer
     RAG_TRAINER_AVAILABLE = True
@@ -55,12 +52,9 @@ except ImportError as e:
     RAG_TRAINER_AVAILABLE = False
     print(f"❌ RAG Trainer 모듈 로드 실패: {e}")
 
-# RAG 학습 - Jira 연동과 RAG Trainer 둘 다 필요
+# RAG 학습 가능 여부
 RAG_AVAILABLE = JIRA_AVAILABLE and RAG_TRAINER_AVAILABLE
-if RAG_AVAILABLE:
-    print("✅ RAG 학습 가능: Jira 연동 + RAG Trainer")
-else:
-    print("❌ RAG 학습 불가: Jira 연동 또는 RAG Trainer 필요")
+print("✅ RAG 학습 가능: Jira 연동 + RAG Trainer" if RAG_AVAILABLE else "❌ RAG 학습 불가: Jira 연동 또는 RAG Trainer 필요")
 
 # Slack 연동 (선택사항)
 try:
@@ -70,7 +64,7 @@ except ImportError:
     SLACK_AVAILABLE = False
     print("Slack 연동 모듈을 찾을 수 없습니다.")
 
-# Drain3 import
+# Drain3 / Watchdog
 try:
     from drain3 import TemplateMiner
     from watchdog.observers import Observer
@@ -79,8 +73,7 @@ except ImportError as e:
     print(f"필수 모듈 import 실패: {e}")
     print("pip install -r requirements.txt를 실행하세요.")
 
-
-# Flask 앱 생성
+# Flask 앱
 app = Flask(__name__)
 app.secret_key = 'your-secret-key-here'
 socketio = SocketIO(app, cors_allowed_origins="*")
@@ -96,11 +89,11 @@ dashboard_data = {
     'last_frequent_alert': {},
     'ssh_logs': deque(maxlen=500),
     'ai_analyses': deque(maxlen=50),
-    'rag_training_history': deque(maxlen=10),  # 🔥 추가
-    'last_rag_result': None  # 🔥 추가
+    'rag_training_history': deque(maxlen=10),
+    'last_rag_result': None
 }
 
-# 모듈 상태 추적
+# 모듈 상태
 module_status = {
     'log_monitoring': {'status': 'running', 'process': None},
     'ssh_connection': {
@@ -122,18 +115,18 @@ module_status = {
     }
 }
 
-
 # 🔥 LogClusteringHandler를 상속받아 웹 대시보드 전용 핸들러 생성
 class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else FileSystemEventHandler):
     """웹 대시보드용 파일 모니터링 핸들러 - LogClusteringHandler 상속"""
 
     def __init__(self, watch_dir="logs"):
-        # 🔥 부모 클래스(LogClusteringHandler) 초기화
+        # [호출] 부모 초기화: Drain3/분류기/AI/Slack 등 상위 핸들러 설정 로딩
         if CLUSTERING_AVAILABLE:
             super().__init__()
             print("✅ LogClusteringHandler 상속 완료")
         else:
             print("⚠️ LogClusteringHandler 없음 - 기본 핸들러 사용")
+            # (폴백) 최소 필드 준비
             self.last_position = {}
             self.error_keywords = ['ERROR', 'FATAL', 'Exception', 'Failed', 'Error:']
             self.template_miner = None
@@ -144,7 +137,7 @@ class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else File
 
         self.watch_dir = watch_dir
 
-        # 🔥 Ollama AI 분석기 설정 (이미 부모에서 초기화되었지만 상태 업데이트)
+        # [호출] AI 분석기 상태를 웹 모듈 상태에 반영
         if hasattr(self, 'ollama_analyzer') and self.ollama_analyzer:
             module_status['ai_analyzer']['enabled'] = self.ollama_analyzer.enabled
             module_status['ai_analyzer']['status'] = 'enabled' if self.ollama_analyzer.enabled else 'disabled'
@@ -163,11 +156,11 @@ class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else File
         try:
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                 last_pos = self.last_position.get(file_path, 0)
+                # [호출] 파일 포인터 이동: 마지막 읽은 위치로 점프
                 f.seek(last_pos)
 
                 new_lines = f.readlines()
                 self.last_position[file_path] = f.tell()
-
                 print(f"   📄 새 라인: {len(new_lines)}개")
 
                 for line in new_lines:
@@ -178,18 +171,18 @@ class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else File
                     self.total_logs += 1
                     dashboard_data['total_logs'] += 1
 
-                    # 에러 라인인지 확인
+                    # [호출] 에러 여부 판단
                     if self.is_error_line(line):
                         self.error_logs += 1
                         dashboard_data['error_logs'] += 1
 
-                        # 🔥 대시보드 데이터 업데이트
+                        # [호출] 대시보드 데이터 갱신
                         self.update_dashboard_data(line, is_error=True)
 
-                        # 🔥 에러 클러스터링 + AI 분석
+                        # [호출] 클러스터링 + (조건부) AI 분석
                         self.handle_error_clustering(line)
 
-                        # 🔥 실시간 Socket.IO 전송
+                        # [호출] 실시간 에러 로그 푸시 (Socket.IO)
                         try:
                             socketio.emit('new_error_log', {
                                 'timestamp': datetime.now().isoformat(),
@@ -199,37 +192,33 @@ class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else File
                         except Exception as e:
                             print(f"Socket 전송 오류: {e}")
                     else:
-                        # 일반 로그도 대시보드에 추가
+                        # [호출] 일반 로그도 대시보드 반영
                         self.update_dashboard_data(line, is_error=False)
 
         except Exception as e:
             print(f"❌ 파일 읽기 오류: {e}")
 
     def update_dashboard_data(self, line, is_error=False):
-        """🔥 대시보드 데이터 업데이트 (웹 전용 메서드)"""
+        """대시보드 데이터 업데이트"""
         log_entry = {
             'timestamp': datetime.now().isoformat(),
             'content': line,
             'type': 'error' if is_error else 'info',
             'severity': self.get_log_severity(line) if is_error else 'info'
         }
+        # [호출] 최근 로그 큐에 적재
         dashboard_data['recent_logs'].append(log_entry)
 
         if is_error:
-            # 에러 타임라인 업데이트
+            # [호출] 에러 타임라인에 카운트 1건 적재
             now = datetime.now()
-            timeline_entry = {
-                'timestamp': now.isoformat(),
-                'count': 1
-            }
+            timeline_entry = {'timestamp': now.isoformat(), 'count': 1}
             dashboard_data['error_timeline'].append(timeline_entry)
-
             print(f"🚨 [ERROR] {line[:100]}...")
 
     def get_log_severity(self, line):
         """로그 심각도 판단"""
         line_upper = line.upper()
-
         if 'FATAL' in line_upper or 'CRITICAL' in line_upper:
             return 'critical'
         elif 'ERROR' in line_upper or 'EXCEPTION' in line_upper:
@@ -240,27 +229,27 @@ class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else File
             return 'info'
 
     def handle_error_clustering(self, error_line):
-        """🔥 에러 클러스터링 처리 - 부모 메서드 오버라이드하여 웹 기능 추가"""
+        """에러 클러스터링 처리 - 웹 기능 추가"""
         if not self.template_miner:
             print("❌ Drain3 엔진이 초기화되지 않음")
             return
 
         timestamp = datetime.now().strftime("%H:%M:%S")
-
         print(f"\n🚨 [{timestamp}] 에러 감지!")
         print(f"📝 로그: {error_line}")
 
         try:
-            # Drain3로 클러스터링
+            # [호출] Drain3로 로그 템플릿/클러스터 식별
             result = self.template_miner.add_log_message(error_line)
 
+            # [호출] 상위/헬퍼 메서드로 클러스터 ID/템플릿 추출
             cluster_id = self.get_cluster_id(result)
             template = self.get_template(result)
 
             print(f"🏷️  클러스터 ID: {cluster_id}")
             print(f"📋 템플릿: {template}")
 
-            # 🔥 대시보드 클러스터 정보 업데이트
+            # [호출] 대시보드 클러스터 정보 준비(없으면 생성)
             if cluster_id not in dashboard_data['clusters']:
                 dashboard_data['clusters'][cluster_id] = {
                     'template': template,
@@ -276,31 +265,26 @@ class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else File
             cluster['count'] += 1
             cluster['last_seen'] = datetime.now().isoformat()
             cluster['severity'] = self.get_severity(cluster['count'])
-            cluster['recent_logs'].append({
-                'content': error_line,
-                'timestamp': datetime.now().isoformat()
-            })
-
+            # [호출] 최근 로그 예시 저장
+            cluster['recent_logs'].append({'content': error_line, 'timestamp': datetime.now().isoformat()})
+            # [호출] 집계
             dashboard_data['cluster_stats'][cluster_id] += 1
 
             cluster_size = cluster['count']
             print(f"📊 발생 횟수: {cluster_size}번")
 
-            # 🔥 빈발 패턴 감지 (3회 이상)
+            # [호출] 빈발(>=3) 시 알림/AI 분석 트리거
             if cluster_size >= 3:
                 print(f"⚠️  빈발 패턴 감지! {cluster_size}번 발생")
-
-                # 🔥 AI 분석 수행 (있으면)
+                # [호출] AI 분석 (가능 시)
                 if self.ollama_analyzer and self.ollama_analyzer.enabled:
                     print("🤖 AI 분석기 활성화됨 - AI 분석 시작")
                     self.perform_ai_analysis_for_web(cluster_id, cluster, error_line, template)
-                    # ↑ 여기서 AI 분석 + Slack 전송 (AI 포함)
                 else:
                     print("💬 AI 분석기 비활성화 - 기본 알림만 전송")
-                    # AI 없이 기본 Slack 알림
                     self.alert_frequent_error(error_line, template, cluster_size, cluster_id)
 
-            # 🔥 Socket.IO로 클러스터 업데이트 전송
+            # [호출] 클러스터 업데이트를 웹으로 푸시
             try:
                 socketio.emit('cluster_update', {
                     'cluster_id': cluster_id,
@@ -333,12 +317,8 @@ class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else File
         """빈발 에러 Slack 알림 (AI 분석 없는 기본 버전)"""
         try:
             if self.slack_notifier and self.slack_notifier.enabled:
-                # 로그 예시 준비
-                examples = [
-                    {'text': error_line, 'timestamp': datetime.now().isoformat()}
-                ]
-
-                # 기본 Slack 알림 (AI 분석 없음)
+                examples = [{'text': error_line, 'timestamp': datetime.now().isoformat()}]
+                # [호출] Slack 알림 전송
                 self.slack_notifier.send_error_alert(
                     template=template,
                     count=count,
@@ -352,12 +332,11 @@ class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else File
             print(f"⚠️ Slack 알림 실패: {e}")
 
     def perform_ai_analysis_for_web(self, cluster_id, cluster, error_log, template):
-        """🔥 웹 대시보드용 AI 분석 수행 (ollama_integration 사용)"""
-        analysis_start_time = datetime.now().strftime("%H:%M:%S")
-        print(f"🤖 웹 대시보드 AI 분석 시작: {template[:50]}... (시작시간: {analysis_start_time})")
+        """웹 대시보드용 AI 분석 수행 (ollama_integration 사용)"""
+        print(f"🤖 웹 대시보드 AI 분석 시작: {template[:50]}...")
 
         try:
-            # AI 분석 실행
+            # [호출] AI 분석 실행
             ai_analysis = self.ollama_analyzer.analyze_error(
                 error_log=error_log,
                 error_template=template,
@@ -371,7 +350,7 @@ class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else File
                 }
             )
 
-            # 클러스터에 저장
+            # [호출] 분석 결과를 메모리/히스토리에 반영
             cluster['ai_analysis'] = ai_analysis
             dashboard_data['ai_analyses'].append({
                 'cluster_id': cluster_id,
@@ -381,42 +360,24 @@ class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else File
             })
             module_status['ai_analyzer']['last_analysis'] = datetime.now().isoformat()
 
-            # 콘솔 출력
-            print(f"\n🧠 AI 분석 완료:")
-            print(f"   에러 유형: {ai_analysis['error_type']}")
-            print(f"   심각도: {ai_analysis['severity']}")
-            print(f"   근본 원인: {ai_analysis['root_cause']}")
-            print(f"   신뢰도: {ai_analysis['confidence']}%")
+            print(f"\n🧠 AI 분석 완료: {ai_analysis.get('error_type')} / {ai_analysis.get('severity')}")
 
-            print(f"\n⚡ 즉시 조치사항:")
-            for i, action in enumerate(ai_analysis['immediate_actions'], 1):
-                print(f"   {i}. {action}")
-
-            print(f"\n🔧 장기적 해결방안:")
-            for i, solution in enumerate(ai_analysis['long_term_solutions'], 1):
-                print(f"   {i}. {solution}")
-
-            # 🔥 Slack에 AI 분석 포함해서 전송
+            # [호출] Slack (AI 포함) 알림
             try:
                 if self.slack_notifier and self.slack_notifier.enabled:
-                    # 로그 예시 준비
-                    examples = [
-                        {'text': error_log, 'timestamp': datetime.now().isoformat()}
-                    ]
-
-                    # AI 분석 포함 Slack 알림
+                    examples = [{'text': error_log, 'timestamp': datetime.now().isoformat()}]
                     self.slack_notifier.send_error_alert_with_ai(
                         template=template,
                         count=cluster['count'],
                         cluster_id=cluster_id,
-                        ai_analysis=ai_analysis,  # ✅ AI 분석 결과 포함!
+                        ai_analysis=ai_analysis,
                         examples=examples
                     )
                     print("✅ Slack 알림 (AI 분석 포함) 전송 완료")
             except Exception as e:
                 print(f"⚠️ Slack 알림 실패: {e}")
 
-            # Socket.IO 전송
+            # [호출] 웹으로 AI 완료 이벤트 푸시
             try:
                 socketio.emit('ai_analysis_complete', {
                     'cluster_id': cluster_id,
@@ -434,13 +395,14 @@ class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else File
 
 
 def monitor_ssh_logs(ssh_client, log_path):
-    """🔥 SSH를 통한 원격 로그 모니터링 + 자동 AI 분석"""
+    """SSH 원격 로그 모니터링 + 자동 AI 분석"""
     try:
         print(f"🔍 SSH 로그 모니터링 시작: {log_path}")
 
+        # [호출] 원격 tail -f 실행
         stdin, stdout, stderr = ssh_client.exec_command(f'tail -f {log_path}')
 
-        # 웹 핸들러 초기화
+        # [호출] 웹 핸들러 전역 준비 (1회)
         if 'web_handler' not in globals():
             global web_handler
             web_handler = WebDashboardHandler()
@@ -450,27 +412,29 @@ def monitor_ssh_logs(ssh_client, log_path):
                 break
 
             line = line.strip()
-            if line:
-                is_error = web_handler.is_error_line(line)
+            if not line:
+                continue
 
-                # SSH 로그 저장소에 추가
-                ssh_log_entry = {
-                    'timestamp': datetime.now().isoformat(),
-                    'content': line,
-                    'type': 'error' if is_error else 'info',
-                    'source': 'ssh'
-                }
-                dashboard_data['ssh_logs'].append(ssh_log_entry)
+            is_error = web_handler.is_error_line(line)
 
-                # 대시보드 데이터 업데이트
-                web_handler.update_dashboard_data(line, is_error)
+            # [호출] SSH 로그 버퍼에 적재
+            ssh_log_entry = {
+                'timestamp': datetime.now().isoformat(),
+                'content': line,
+                'type': 'error' if is_error else 'info',
+                'source': 'ssh'
+            }
+            dashboard_data['ssh_logs'].append(ssh_log_entry)
 
-                # 🔥 에러인 경우 클러스터링 + AI 분석 자동 실행
-                if is_error:
-                    web_handler.handle_error_clustering(line)
+            # [호출] 대시보드 데이터 갱신
+            web_handler.update_dashboard_data(line, is_error)
 
-                # 실시간 전송
-                socketio.emit('ssh_log_update', ssh_log_entry)
+            # [호출] 에러면 클러스터링(+AI) 수행
+            if is_error:
+                web_handler.handle_error_clustering(line)
+
+            # [호출] 실시간 SSH 로그 푸시
+            socketio.emit('ssh_log_update', ssh_log_entry)
 
     except Exception as e:
         print(f"❌ SSH 로그 모니터링 오류: {e}")
@@ -481,33 +445,32 @@ def monitor_ssh_logs(ssh_client, log_path):
 def rag_learning_process(model_name='sentence-transformers/all-MiniLM-L6-v2', max_results=20):
     """RAG 학습 프로세스 (Jira 연동)"""
     try:
+        # [호출] 프런트에 진행률 전송 (초기)
         socketio.emit('rag_progress', {'stage': 'init', 'progress': 0, 'total': 100})
 
         if not JIRA_AVAILABLE:
             raise Exception("Jira 모듈을 사용할 수 없습니다")
-
-        if not RAG_TRAINER_AVAILABLE:  # 이 부분 수정
+        if not RAG_TRAINER_AVAILABLE:
             raise Exception("RAG Trainer 모듈을 사용할 수 없습니다")
 
-        from jira_integration import JiraIntegration
-
         socketio.emit('rag_progress', {'stage': 'connecting', 'progress': 10, 'total': 100, 'detail': 'Jira 연결 중...'})
+        # [호출] Jira 연결
         jira = JiraIntegration()
 
         socketio.emit('rag_progress', {'stage': 'searching', 'progress': 20, 'total': 100, 'detail': 'Bug 이슈 검색 중...'})
-
+        # [호출] Bug 이슈 수집
         bug_data = jira.fetch_bug_issues_for_rag(max_results=max_results)
         all_issues = bug_data['issues']
         issue_keys = bug_data['issue_keys']
         labels_summary = bug_data['labels_summary']
 
         print(f"\n✅ {len(all_issues)}개의 Bug 이슈 수집 완료")
-
         if len(all_issues) == 0:
             raise Exception("Bug 타입의 이슈를 찾을 수 없습니다")
 
         socketio.emit('rag_progress', {'stage': 'preprocessing', 'progress': 50, 'total': 100, 'detail': 'Bug 데이터 전처리 중...'})
 
+        # [호출] RAG 문서화
         documents = []
         for i, issue in enumerate(all_issues):
             try:
@@ -516,17 +479,13 @@ def rag_learning_process(model_name='sentence-transformers/all-MiniLM-L6-v2', ma
 
                 if hasattr(issue.fields, 'description') and issue.fields.description:
                     doc_text += f"Description: {issue.fields.description}\n"
-
                 if hasattr(issue.fields, 'priority') and issue.fields.priority:
                     doc_text += f"Priority: {issue.fields.priority.name}\n"
-
                 if hasattr(issue.fields, 'status') and issue.fields.status:
                     doc_text += f"Status: {issue.fields.status.name}\n"
-
                 if hasattr(issue.fields, 'components') and issue.fields.components:
                     components = [comp.name for comp in issue.fields.components]
                     doc_text += f"Components: {', '.join(components)}\n"
-
                 if hasattr(issue.fields, 'labels') and issue.fields.labels:
                     doc_text += f"Labels: {', '.join(issue.fields.labels)}\n"
 
@@ -544,6 +503,7 @@ def rag_learning_process(model_name='sentence-transformers/all-MiniLM-L6-v2', ma
                 })
 
                 progress = 50 + (i / len(all_issues)) * 20
+                # [호출] 프런트 진행률 업데이트
                 socketio.emit('rag_progress', {
                     'stage': 'preprocessing',
                     'progress': int(progress),
@@ -559,57 +519,47 @@ def rag_learning_process(model_name='sentence-transformers/all-MiniLM-L6-v2', ma
             raise Exception("처리 가능한 Bug 이슈가 없습니다")
 
         print(f"\n✅ {len(documents)}개 문서 전처리 완료")
-
         socketio.emit('rag_progress', {'stage': 'training', 'progress': 70, 'total': 100, 'detail': 'RAG 모델 학습 중...'})
 
+        # [호출] 트레이너 생성
         trainer = RAGTrainer(model_name=model_name)
 
         socketio.emit('rag_progress', {'stage': 'indexing', 'progress': 80, 'total': 100, 'detail': 'Bug 데이터 인덱싱 중...'})
+        # [호출] 벡터 DB 구축
         trainer.build_vector_database(documents)
 
         socketio.emit('rag_progress', {'stage': 'saving', 'progress': 90, 'total': 100, 'detail': '모델 저장 중...'})
         model_path = f"models/bug_rag_model_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-        # 모델 저장 및 학습 결과 반환
-        result = trainer.save_model(model_path)
+        # [호출] 모델 저장
+        save_result = trainer.save_model(model_path)
 
-        # 학습 완료 후 프론트로 전송
-        socketio.emit('rag_complete', {
-            'success': True,
-            'message': f'✅ Bug RAG 학습 완료! {result["issue_count"]}개 이슈 학습됨',
-            'issue_keys': result["issue_keys"],
-            'issue_count': result["issue_count"]
-        })
-
-        # 학습 완료 후 클라이언트에 알림 전송
-        socketio.emit('rag_complete', {
-            'success': True,
-            'message': f'✅ Bug RAG 학습 완료! {result["issue_count"]}개 이슈 학습됨',
-            'issue_keys': result["issue_keys"],
-            'issue_count': result["issue_count"]
-        })
+        # [호출] 학습 완료 이벤트(간단 버전) → 중복 삭제하고 아래 상세 결과로 통합
+        # socketio.emit('rag_complete', {...})  # (삭제됨)
 
         socketio.emit('rag_progress', {'stage': 'complete', 'progress': 100, 'total': 100, 'detail': '학습 완료!'})
 
-        # 🔥 timestamp 추가!
+        # 상세 결과 구성
         result = {
             'success': True,
-            'message': f'Bug RAG 학습 완료! {len(documents)}개의 Bug 이슈로 학습했습니다.',
+            'message': f'✅ Bug RAG 학습 완료! {len(documents)}개 이슈 학습됨',
             'model_path': model_path,
-            'model_name': model_name,  # 🔥 추가
+            'model_name': model_name,
             'bug_count': len(documents),
             'documents_processed': len(documents),
             'issue_keys': issue_keys,
             'labels_summary': labels_summary,
             'top_labels': sorted(labels_summary.items(), key=lambda x: x[1], reverse=True)[:10],
-            'timestamp': datetime.now().isoformat()  # 🔥 추가!
+            'timestamp': datetime.now().isoformat()
         }
 
+        # [호출] 메모리/히스토리 기록
         dashboard_data['last_rag_result'] = result
         dashboard_data['rag_training_history'].append(result)
 
+        # [호출] 프런트에 최종 결과 전송
         socketio.emit('rag_complete', result)
 
-        # 🔥 학습 완료 후 상태 업데이트
+        # [호출] 상태 업데이트
         module_status['rag_learning']['status'] = 'completed'
         module_status['rag_learning']['process'] = None
 
@@ -619,14 +569,13 @@ def rag_learning_process(model_name='sentence-transformers/all-MiniLM-L6-v2', ma
         error_result = {
             'success': False,
             'message': f'RAG 학습 실패: {str(e)}',
-            'timestamp': datetime.now().isoformat()  # 🔥 추가!
+            'timestamp': datetime.now().isoformat()
         }
 
+        # [호출] 실패 이력 적재/전송
         dashboard_data['rag_training_history'].append(error_result)
-
         socketio.emit('rag_error', error_result)
 
-        # 🔥 실패 시 상태 업데이트
         module_status['rag_learning']['status'] = 'failed'
         module_status['rag_learning']['process'] = None
 
@@ -642,9 +591,12 @@ def start_file_monitoring(watch_dir="logs"):
         os.makedirs(watch_dir)
 
     if not hasattr(start_file_monitoring, 'started'):
+        # [호출] 파일 변경 감시 핸들러/옵저버 구성
         web_handler = WebDashboardHandler(watch_dir)
         observer = Observer()
+        # [호출] 디렉터리 감시 등록
         observer.schedule(web_handler, watch_dir, recursive=True)
+        # [호출] 감시 스레드 시작
         observer.start()
         start_file_monitoring.started = True
         print(f"✅ 파일 모니터링 시작: {watch_dir}")
@@ -654,6 +606,7 @@ def start_file_monitoring(watch_dir="logs"):
 @app.route('/')
 def index():
     """메인 페이지"""
+    # [호출] dashboard.html 렌더링 (템플릿은 사전에 준비되어 있어야 함)
     return render_template('dashboard.html')
 
 
@@ -667,14 +620,17 @@ def get_stats():
         'cluster_count': len(dashboard_data['clusters']),
     })
 
+
 @app.route('/api/rag-history')
 def get_rag_history():
-    last = dashboard_data['last_rag_result']
+    """RAG 학습 이력/최근 결과"""
+    last = dashboard_data['last_rag_result'] or {}
     return jsonify({
         'history': list(dashboard_data['rag_training_history']),
         'last_result': last,
-        'issue_keys': last.get('issue_keys', [])  # 🔥 추가
+        'issue_keys': last.get('issue_keys', [])
     })
+
 
 @app.route('/api/clusters')
 def get_clusters():
@@ -688,11 +644,10 @@ def get_clusters():
             'severity': cluster_info['severity'],
             'last_seen': cluster_info['last_seen'],
             'first_seen': cluster_info['first_seen'],
-            'ai_analysis': cluster_info.get('ai_analysis')  # 🔥 AI 분석 결과 포함
+            'ai_analysis': cluster_info.get('ai_analysis')
         }
         clusters.append(cluster_data)
 
-    # 발생 횟수 순으로 정렬
     clusters.sort(key=lambda x: x['count'], reverse=True)
     return jsonify(clusters)
 
@@ -717,7 +672,7 @@ def get_error_timeline():
 
 @app.route('/api/ai-analyses')
 def get_ai_analyses():
-    """🔥 AI 분석 결과 API"""
+    """AI 분석 결과 API"""
     return jsonify(list(dashboard_data['ai_analyses']))
 
 
@@ -725,6 +680,7 @@ def get_ai_analyses():
 def get_system_info():
     """시스템 정보 API"""
     try:
+        # [호출] 시스템 리소스 측정
         cpu_percent = psutil.cpu_percent(interval=1)
         memory = psutil.virtual_memory()
         disk = psutil.disk_usage('/')
@@ -781,15 +737,15 @@ def start_ssh():
 
         if module_status['ssh_connection']['process']:
             return jsonify({'error': 'SSH 연결이 이미 활성화되어 있습니다'}), 400
-
         if not host or not username or not log_path:
             return jsonify({'error': '호스트, 사용자명, 로그 경로를 모두 입력하세요'}), 400
 
-        # SSH 연결 테스트 및 로그 파일 확인
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        # [호출] SSH 접속
         client.connect(host, username=username, password=password, timeout=10)
 
+        # [호출] 로그 경로 존재 여부 확인
         stdin, stdout, stderr = client.exec_command(f'ls -la {log_path}')
         output = stdout.read().decode().strip()
         error_output = stderr.read().decode().strip()
@@ -798,14 +754,14 @@ def start_ssh():
             client.close()
             return jsonify({'error': f'로그 파일을 찾을 수 없습니다: {log_path}'}), 400
 
-        # SSH 연결 정보 저장
+        # 상태 저장
         module_status['ssh_connection']['status'] = 'connected'
         module_status['ssh_connection']['process'] = client
         module_status['ssh_connection']['log_path'] = log_path
         module_status['ssh_connection']['host'] = host
         module_status['ssh_connection']['username'] = username
 
-        # SSH 로그 모니터링 시작
+        # [호출] SSH 로그 모니터링 스레드 시작
         threading.Thread(target=monitor_ssh_logs, args=(client, log_path), daemon=True).start()
 
         return jsonify({
@@ -822,6 +778,7 @@ def stop_ssh():
     """SSH 연결 종료"""
     try:
         if module_status['ssh_connection']['process']:
+            # [호출] SSH 세션 종료
             module_status['ssh_connection']['process'].close()
 
         module_status['ssh_connection']['status'] = 'disconnected'
@@ -829,6 +786,7 @@ def stop_ssh():
         module_status['ssh_connection']['log_path'] = None
         module_status['ssh_connection']['host'] = None
 
+        # [호출] SSH 로그 버퍼 초기화
         dashboard_data['ssh_logs'].clear()
 
         return jsonify({'message': 'SSH 연결이 종료되었습니다'})
@@ -846,23 +804,15 @@ def start_rag():
 
         if module_status['rag_learning']['process']:
             return jsonify({'error': 'RAG 학습이 이미 진행 중입니다'}), 400
-
         if not JIRA_AVAILABLE:
-            return jsonify({
-                'error': 'Jira 연동이 설정되지 않았습니다. .env 파일의 JIRA 설정을 확인하세요.'
-            }), 400
-
+            return jsonify({'error': 'Jira 연동이 설정되지 않았습니다. .env 파일의 JIRA 설정을 확인하세요.'}), 400
         if not RAG_TRAINER_AVAILABLE:
-            return jsonify({
-                'error': 'RAG 학습 모듈이 설정되지 않았습니다. rag_trainer 모듈을 확인하세요.'
-            }), 400
+            return jsonify({'error': 'RAG 학습 모듈이 설정되지 않았습니다. rag_trainer 모듈을 확인하세요.'}), 400
 
+        # [호출] 비동기 학습 스레드 시작
         process = threading.Thread(
             target=rag_learning_process,
-            kwargs={
-                'model_name': model_name,
-                'max_results': max_results
-            },
+            kwargs={'model_name': model_name, 'max_results': max_results},
             daemon=True
         )
         process.start()
@@ -881,9 +831,10 @@ def start_rag():
 
 @app.route('/api/stop-rag', methods=['POST'])
 def stop_rag():
-    """RAG 학습 중지"""
+    """RAG 학습 중지 (소프트 플래그)"""
     try:
         if module_status['rag_learning']['process']:
+            # [호출] 상태만 변경(실제 중단 로직은 트레이너/스레드 내부 구현 필요)
             module_status['rag_learning']['status'] = 'stopped'
             module_status['rag_learning']['process'] = None
             module_status['rag_learning']['progress'] = {
@@ -892,7 +843,6 @@ def stop_rag():
                 'total': 5,
                 'message': '사용자에 의해 중지되었습니다.'
             }
-
         return jsonify({'message': 'RAG 학습이 중지되었습니다'})
     except Exception as e:
         return jsonify({'error': f'RAG 학습 중지 실패: {str(e)}'}), 500
@@ -913,6 +863,7 @@ def check_module_status():
             # SSH 연결 상태 체크
             if module_status['ssh_connection']['process']:
                 try:
+                    # [호출] 간단 keep-alive
                     stdin, stdout, stderr = module_status['ssh_connection']['process'].exec_command('echo "alive"', timeout=5)
                     stdout.read()
                 except:
@@ -929,6 +880,7 @@ def check_module_status():
 @socketio.on('connect')
 def handle_connect():
     print('클라이언트 연결됨')
+    # [호출] 연결 상태 전달
     emit('status', {'message': '대시보드에 연결되었습니다'})
 
 
@@ -940,12 +892,12 @@ def handle_disconnect():
 @socketio.on('request_update')
 def handle_request_update():
     """클라이언트 업데이트 요청 처리"""
+    # [호출] 대시보드 요약 전송
     emit('dashboard_update', {
         'total_logs': dashboard_data['total_logs'],
         'error_logs': dashboard_data['error_logs'],
         'cluster_count': len(dashboard_data['clusters'])
     })
-
 
 # HTML 템플릿 생성
 def create_templates():
