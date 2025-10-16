@@ -1,0 +1,411 @@
+"""
+파일명: clustering_monitor.py
+목적: Watchdog + Drain3를 이용한 실시간 로그 모니터링 (들여쓰기 수정)
+사용법: python clustering_monitor.py
+"""
+
+import os
+import time
+from datetime import datetime
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+from dotenv import load_dotenv
+load_dotenv()
+from drain3 import TemplateMiner
+
+try:
+    from slack_integration import SlackNotifier
+    SLACK_AVAILABLE = True
+except ImportError:
+    SLACK_AVAILABLE = False
+    print("Slack 연동 모듈을 찾을 수 없습니다. 콘솔 출력만 진행합니다.")
+
+try:
+    from ollama_integration import OllamaErrorAnalyzer
+    OLLAMA_AVAILABLE = True
+except ImportError:
+    OLLAMA_AVAILABLE = False
+    print("Ollama 연동 모듈을 찾을 수 없습니다. AI 분석 기능이 비활성화됩니다.")
+
+class LogClusteringHandler(FileSystemEventHandler):
+    """실시간 로그 클러스터링 핸들러"""
+
+    def __init__(self):
+        # 파일별 마지막 읽은 위치 저장
+        self.last_position = {}
+
+        # 에러 키워드 정의
+        self.error_keywords = ['ERROR', 'FATAL', 'Exception', 'Failed', 'Error:']
+
+        # Drain3 엔진 초기화
+        self.template_miner = self.initialize_drain3()
+
+        # 통계 변수
+        self.total_logs = 0
+        self.error_logs = 0
+
+        if self.template_miner:
+            print("✅ Drain3 엔진 초기화 완료")
+        else:
+            print("❌ Drain3 엔진 초기화 실패")
+
+        # Slack 연동 초기화 (맨 아래에 추가)
+        if SLACK_AVAILABLE:
+            self.slack_notifier = SlackNotifier()
+            if self.slack_notifier.enabled:
+                print("✅ Slack 연동 활성화됨")
+            else:
+                print("⚠️ Slack 비활성화 - 콘솔 출력만 진행")
+        else:
+            self.slack_notifier = None
+
+        # Ollama AI 분석기 초기화
+        if OLLAMA_AVAILABLE:
+            self.ollama_analyzer = OllamaErrorAnalyzer()
+            if self.ollama_analyzer.enabled:
+                print("✅ Ollama AI 분석기 활성화됨")
+            else:
+                print("⚠️ Ollama 비활성화 - 기본 분석만 진행")
+        else:
+            self.ollama_analyzer = None
+
+    def initialize_drain3(self):
+        """Drain3 초기화"""
+        try:
+            template_miner = TemplateMiner()
+            print("✅ 기본 설정으로 Drain3 초기화 성공")
+            return template_miner
+        except Exception as e:
+            print(f"❌ Drain3 초기화 실패: {e}")
+            return None
+
+    def on_modified(self, event):
+        """파일 변경 감지시 호출"""
+        if not self.template_miner:
+            return
+
+        # .log 파일만 처리
+        if event.is_directory or not event.src_path.endswith('.log'):
+            return
+
+        filename = os.path.basename(event.src_path)
+        print(f"\n📁 파일 변경: {filename}")
+
+        self.process_new_logs(event.src_path)
+
+    def process_new_logs(self, file_path):
+        """새로운 로그 라인 처리"""
+        if not self.template_miner:
+            return
+
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                # 마지막 위치부터 읽기
+                last_pos = self.last_position.get(file_path, 0)
+                f.seek(last_pos)
+
+                new_lines = f.readlines()
+                self.last_position[file_path] = f.tell()
+
+                print(f"   📄 새 라인: {len(new_lines)}개")
+
+                # 각 라인 검사
+                for line in new_lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+
+                    self.total_logs += 1
+
+                    # 에러 라인인지 확인
+                    if self.is_error_line(line):
+                        self.error_logs += 1
+                        self.handle_error_clustering(line)
+
+        except Exception as e:
+            print(f"❌ 파일 읽기 오류: {e}")
+
+    def is_error_line(self, line):
+        """에러 라인 판단"""
+        return any(keyword in line for keyword in self.error_keywords)
+
+    def handle_error_clustering(self, error_line):
+        """에러 로그 클러스터링 처리"""
+        if not self.template_miner:
+            print("❌ Drain3 엔진이 초기화되지 않음")
+            return
+
+        timestamp = datetime.now().strftime("%H:%M:%S")
+
+        print(f"\n🚨 [{timestamp}] 에러 감지!")
+        print(f"📝 로그: {error_line}")
+
+        try:
+            # Drain3로 클러스터링
+            result = self.template_miner.add_log_message(error_line)
+
+            # 결과 처리 (dict 또는 객체 모두 지원)
+            cluster_id = self.get_cluster_id(result)
+            template = self.get_template(result)
+
+            # 현재 클러스터 ID 저장 (Slack에서 사용)
+            self.current_cluster_id = cluster_id
+
+            print(f"🏷️  클러스터 ID: {cluster_id}")
+            print(f"📋 템플릿: {template}")
+
+            # 클러스터 정보 분석
+            cluster_size = self.get_cluster_size(cluster_id)
+            if cluster_size > 0:
+                print(f"📊 발생 횟수: {cluster_size}번")
+
+                # 빈발 패턴 감지
+                if cluster_size >= 3:
+                    print(f"⚠️  빈발 패턴 감지! {cluster_size}번 발생")
+                    self.alert_frequent_error(error_line, template, cluster_size, cluster_id)
+            else:
+                print(f"🔍 디버깅: 클러스터 {cluster_id} 크기가 0인 이유 조사")
+                clusters_dict = self.get_clusters_dict()
+                print(f"   전체 클러스터 수: {len(clusters_dict)}")
+                print(f"   클러스터 ID {cluster_id} 존재 여부: {cluster_id in clusters_dict}")
+
+        except Exception as e:
+            print(f"❌ 클러스터링 처리 오류: {e}")
+
+        print("-" * 50)
+
+    def get_cluster_id(self, result):
+        """결과에서 클러스터 ID 추출"""
+        if isinstance(result, dict):
+            return result.get('cluster_id', 'unknown')
+        else:
+            return getattr(result, 'cluster_id', 'unknown')
+
+    def get_template(self, result):
+        """결과에서 템플릿 추출"""
+        if isinstance(result, dict):
+            return result.get('template_mined', result.get('template', 'unknown'))
+        else:
+            return getattr(result, 'template', 'unknown')
+
+    def get_cluster_size(self, cluster_id):
+        """클러스터 크기 조회"""
+        try:
+            clusters = self.get_clusters_dict()
+            if clusters and cluster_id in clusters:
+                cluster = clusters[cluster_id]
+                return getattr(cluster, 'size', 0)
+            return 0
+        except Exception:
+            return 0
+
+    def get_clusters_dict(self):
+        try:
+            # get_cluster_size()와 동일한 방법 사용
+            if hasattr(self.template_miner, 'drain') and hasattr(self.template_miner.drain, 'id_to_cluster'):
+                id_to_cluster = self.template_miner.drain.id_to_cluster
+                if isinstance(id_to_cluster, dict):
+                    print(f"   id_to_cluster 발견: {len(id_to_cluster)}개 클러스터")
+                    return id_to_cluster
+
+            # 백업 방법: clusters를 순회하여 딕셔너리 재구성
+            if hasattr(self.template_miner, 'drain') and hasattr(self.template_miner.drain, 'clusters'):
+                clusters_values = self.template_miner.drain.clusters
+                reconstructed = {}
+
+                for cluster in clusters_values:
+                    if hasattr(cluster, 'cluster_id'):
+                        cluster_id = cluster.cluster_id
+                        reconstructed[cluster_id] = cluster
+
+                if len(reconstructed) > 0:
+                    print(f"   클러스터 재구성 성공: {len(reconstructed)}개")
+                    return reconstructed
+
+            return {}
+        except Exception as e:
+            print(f"   클러스터 딕셔너리 조회 오류: {e}")
+            return {}
+
+    def alert_frequent_error(self, error_line, template, count, cluster_id):
+        """빈발 에러 알림 (AI 분석 포함)"""
+        print(f"🔥 긴급! 반복 에러 패턴: {template}")
+        print(f"📈 발생 횟수: {count}번")
+
+        # AI 분석 수행
+        ai_analysis = None
+        if self.ollama_analyzer and self.ollama_analyzer.enabled:
+            analysis_start_time = datetime.now().strftime("%H:%M:%S")
+            print(f"🤖 AI 분석 시작... (시작시간: {analysis_start_time})")
+            try:
+                ai_analysis = self.ollama_analyzer.analyze_error(
+                    error_log=error_line,
+                    error_template=template,
+                    occurrence_count=count,
+                    context={
+                        "cluster_id": cluster_id,
+                        "detection_time": datetime.now().isoformat(),
+                        "total_logs": self.total_logs,
+                        "error_logs": self.error_logs
+                    }
+                )
+
+                # AI 분석 결과 출력
+                print(f"\n🧠 AI 분석 결과:")
+                print(f"   에러 유형: {ai_analysis['error_type']}")
+                print(f"   심각도: {ai_analysis['severity']}")
+                print(f"   근본 원인: {ai_analysis['root_cause']}")
+                print(f"   신뢰도: {ai_analysis['confidence']}%")
+
+                print(f"\n⚡ 즉시 조치사항:")
+                for i, action in enumerate(ai_analysis['immediate_actions'], 1):
+                    print(f"   {i}. {action}")
+
+                print(f"\n🔧 장기적 해결방안:")
+                for i, solution in enumerate(ai_analysis['long_term_solutions'], 1):
+                    print(f"   {i}. {solution}")
+
+                print(f"\n🛡️ 예방 방법:")
+                for i, tip in enumerate(ai_analysis['prevention_tips'], 1):
+                    print(f"   {i}. {tip}")
+
+            except Exception as e:
+                print(f"❌ AI 분석 실패: {e}")
+                ai_analysis = None
+
+        # 기존 패턴 분석 (AI 분석 실패시 또는 백업용)
+        if not ai_analysis:
+            template_str = str(template).lower()
+            if 'nullpointer' in template_str:
+                print(f"🎯 권장사항: 널체크 코드 추가 필요")
+            elif 'database' in template_str or 'connection' in template_str:
+                print(f"🎯 권장사항: DB 커넥션 풀 상태 확인")
+            elif 'outofmemory' in template_str:
+                print(f"🎯 권장사항: 메모리 사용량 및 힙 크기 확인")
+            elif 'filenotfound' in template_str:
+                print(f"🎯 권장사항: 파일 경로 및 권한 확인")
+
+        # Slack 알림 (AI 분석 결과 포함)
+        if self.slack_notifier:
+            self.slack_notifier.send_error_alert_with_ai(
+                template=template,
+                count=count,
+                cluster_id=cluster_id,
+                ai_analysis=ai_analysis
+            )
+
+        print(f"💡 TODO: RAG 시스템으로 해결책 검색")
+
+    def print_summary(self):
+        """현황 요약 출력 (수정 완료)"""
+        if not self.template_miner:
+            print("❌ Drain3 엔진 미초기화로 요약 불가")
+            return
+
+        print(f"\n📈 === 현황 요약 ===")
+        print(f"⏰ 시간: {datetime.now().strftime('%H:%M:%S')}")
+        print(f"📋 총 로그: {self.total_logs}개")
+        print(f"🚨 에러 로그: {self.error_logs}개")
+
+        # 수정된 클러스터 조회
+        clusters_dict = self.get_clusters_dict()
+        print(f"🏷️  클러스터: {len(clusters_dict)}개")
+
+        if clusters_dict:
+            print(f"\n🏆 TOP 5 에러 패턴:")
+
+            # 클러스터를 크기 순으로 정렬
+            cluster_items = []
+            for cluster_id, cluster in clusters_dict.items():
+                size = getattr(cluster, 'size', 0)
+                template = self.get_cluster_template(cluster)
+                cluster_items.append((cluster_id, template, size))
+
+            # 크기 순으로 정렬 (내림차순)
+            sorted_clusters = sorted(cluster_items, key=lambda x: x[2], reverse=True)
+
+            # 상위 5개 출력
+            for i, (cid, template, size) in enumerate(sorted_clusters[:5], 1):
+                print(f"   {i}. [{size}번] {template}")
+
+                # 심각도 표시
+                if size >= 50:
+                    print(f"      🔴 매우 심각 - 즉시 조치 필요")
+                elif size >= 20:
+                    print(f"      🟠 심각 - 빠른 조치 필요")
+                elif size >= 10:
+                    print(f"      🟡 주의 - 모니터링 필요")
+                else:
+                    print(f"      🟢 경미 - 관찰 중")
+        else:
+            print(f"   아직 에러 패턴이 발견되지 않았습니다.")
+
+        # 간단한 통계
+        if self.total_logs > 0:
+            error_rate = (self.error_logs / self.total_logs) * 100
+            print(f"📊 에러율: {error_rate:.1f}%")
+
+            if error_rate > 80:
+                print(f"⚠️  시스템 상태 위험! 에러율이 {error_rate:.1f}%입니다")
+            elif error_rate > 50:
+                print(f"⚠️  시스템 상태 주의! 에러율이 {error_rate:.1f}%입니다")
+
+    def get_cluster_template(self, cluster):
+        """클러스터에서 템플릿 추출"""
+        try:
+            if hasattr(cluster, 'log_template_tokens'):
+                return ' '.join(cluster.log_template_tokens)
+            elif hasattr(cluster, 'get_template'):
+                return cluster.get_template()
+            else:
+                return str(cluster)
+        except Exception:
+            return "unknown"
+
+def start_monitoring():
+    """모니터링 시작"""
+    watch_dir = r"D:\devcon\logs"
+
+    print("🚀 실시간 로그 모니터링 시작 (들여쓰기 수정 버전)")
+    print(f"📁 감시 디렉토리: {watch_dir}")
+
+    # 디렉토리 생성
+    os.makedirs(watch_dir, exist_ok=True)
+
+    # 핸들러와 Observer 설정
+    handler = LogClusteringHandler()
+
+    if not handler.template_miner:
+        print("❌ Drain3 초기화 실패로 모니터링을 시작할 수 없습니다")
+        return
+
+    observer = Observer()
+    observer.schedule(handler, watch_dir, recursive=True)
+    observer.start()
+
+    print("👁️  파일 감시 시작됨")
+    print("💡 다른 터미널에서 3_log_generator.py 실행하세요")
+    print("🛑 Ctrl+C로 종료")
+
+    try:
+        while True:
+            time.sleep(1)  # 10초 → 1초로 변경 (더 반응성 좋게)
+            # 10초마다 요약 출력하려면 카운터 사용
+            if hasattr(handler, 'summary_counter'):
+                handler.summary_counter += 1
+            else:
+                handler.summary_counter = 1
+
+            if handler.summary_counter >= 10:  # 10초마다
+                handler.print_summary()
+                handler.summary_counter = 0
+
+    except KeyboardInterrupt:
+        print(f"\n⏹️  모니터링 중단")
+        handler.print_summary()  # 최종 요약
+        observer.stop()
+        observer.join()
+        print("✅ 종료 완료")
+
+if __name__ == "__main__":
+    start_monitoring()

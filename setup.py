@@ -46,8 +46,8 @@ def setup_project():
     # .env 파일 생성
     if not os.path.exists('.env'):
         print(".env 파일 생성 중...")
-        if os.path.exists('.env.example'):
-            with open('.env.example', 'r') as src, open('.env', 'w') as dst:
+        if os.path.exists('.env'):
+            with open('.env', 'r') as src, open('.env', 'w') as dst:
                 dst.write(src.read())
     
     print("설정 완료!")

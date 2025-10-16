@@ -46,7 +46,7 @@ def main():
         print("👀 실시간 로그 모니터링을 시작합니다...")
         try:
             import subprocess
-            subprocess.run([sys.executable, '2_clustering_monitor.py'])
+            subprocess.run([sys.executable, 'clustering_monitor.py'])
         except Exception as e:
             print(f"❌ 클러스터링 모니터 실행 실패: {e}")
 
