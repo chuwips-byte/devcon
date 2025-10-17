@@ -25,14 +25,26 @@ except ImportError as e:
     CLUSTERING_AVAILABLE = False
     print(f"❌ clustering_monitor 로드 실패: {e}")
 
-# 🔥 ollama_integration에서 OllamaErrorAnalyzer import
+# 🔥 ollama_integration에서 AI 분석기 import (수정된 버전)
 try:
-    from ollama_integration import OllamaErrorAnalyzer
-    OLLAMA_AVAILABLE = True
-    print("✅ OllamaErrorAnalyzer 클래스 로드 성공")
+    from ollama_integration import RagIntegratedOllamaAnalyzer
+    RAG_OLLAMA_AVAILABLE = True
+    print("✅ RAG 통합 Ollama 분석기 로드 성공")
 except ImportError as e:
-    OLLAMA_AVAILABLE = False
-    print(f"❌ ollama_integration 로드 실패: {e}")
+    RAG_OLLAMA_AVAILABLE = False
+    print(f"❌ RAG 통합 Ollama 분석기 로드 실패: {e}")
+
+# 기존 OllamaErrorAnalyzer는 더 이상 시도하지 않음 (존재하지 않으므로)
+OLLAMA_AVAILABLE = RAG_OLLAMA_AVAILABLE
+
+# 파일 상단에 추가
+try:
+    from ollama_integration import RagIntegratedOllamaAnalyzer
+    RAG_OLLAMA_AVAILABLE = True
+    print("✅ RAG 통합 Ollama 분석기 로드 성공")
+except ImportError as e:
+    RAG_OLLAMA_AVAILABLE = False
+    print(f"❌ RAG 통합 Ollama 분석기 로드 실패: {e}")
 
 # Jira 연동 import
 try:
@@ -117,16 +129,13 @@ module_status = {
 
 # 🔥 LogClusteringHandler를 상속받아 웹 대시보드 전용 핸들러 생성
 class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else FileSystemEventHandler):
-    """웹 대시보드용 파일 모니터링 핸들러 - LogClusteringHandler 상속"""
-
     def __init__(self, watch_dir="logs"):
-        # [호출] 부모 초기화: Drain3/분류기/AI/Slack 등 상위 핸들러 설정 로딩
+        # 부모 초기화
         if CLUSTERING_AVAILABLE:
             super().__init__()
             print("✅ LogClusteringHandler 상속 완료")
         else:
             print("⚠️ LogClusteringHandler 없음 - 기본 핸들러 사용")
-            # (폴백) 최소 필드 준비
             self.last_position = {}
             self.error_keywords = ['ERROR', 'FATAL', 'Exception', 'Failed', 'Error:']
             self.template_miner = None
@@ -137,7 +146,19 @@ class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else File
 
         self.watch_dir = watch_dir
 
-        # [호출] AI 분석기 상태를 웹 모듈 상태에 반영
+        # RAG 통합 Ollama 분석기 초기화
+        self.ollama_analyzer = None
+        if RAG_OLLAMA_AVAILABLE:
+            try:
+                self.ollama_analyzer = RagIntegratedOllamaAnalyzer()
+                print("✅ RAG 통합 Ollama 분석기 초기화 성공")
+            except Exception as e:
+                print(f"❌ RAG 통합 Ollama 분석기 초기화 실패: {e}")
+                self.ollama_analyzer = None
+        else:
+            print("❌ RAG 통합 Ollama 분석기 사용 불가")
+
+        # AI 분석기 상태 반영
         if hasattr(self, 'ollama_analyzer') and self.ollama_analyzer:
             module_status['ai_analyzer']['enabled'] = self.ollama_analyzer.enabled
             module_status['ai_analyzer']['status'] = 'enabled' if self.ollama_analyzer.enabled else 'disabled'
@@ -147,6 +168,15 @@ class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else File
             module_status['ai_analyzer']['status'] = 'unavailable'
 
         print("✅ 웹 대시보드 핸들러 초기화 완료")
+
+    def reload_ai_rag_model(self):
+        """RAG 학습 완료 후 AI 분석기 모델 갱신"""
+        if hasattr(self, 'ollama_analyzer') and self.ollama_analyzer:
+            try:
+                self.ollama_analyzer.reload_rag_model()
+                print("✅ AI 분석기 RAG 모델 갱신 완료")
+            except Exception as e:
+                print(f"❌ AI 분석기 RAG 모델 갱신 실패: {e}")
 
     def process_new_logs(self, file_path):
         """새로운 로그 라인 처리 - 부모 메서드 오버라이드"""
@@ -559,9 +589,13 @@ def rag_learning_process(model_name='sentence-transformers/all-MiniLM-L6-v2', ma
         # [호출] 프런트에 최종 결과 전송
         socketio.emit('rag_complete', result)
 
-        # [호출] 상태 업데이트
-        module_status['rag_learning']['status'] = 'completed'
-        module_status['rag_learning']['process'] = None
+        # 🔥 학습 완료 후 AI 분석기 RAG 모델 갱신
+        if 'web_handler' in globals() and hasattr(web_handler, 'reload_ai_rag_model'):
+            try:
+                web_handler.reload_ai_rag_model()
+                print("✅ 웹 대시보드 AI 분석기 RAG 모델 갱신 완료")
+            except Exception as e:
+                print(f"⚠️ 웹 대시보드 AI 분석기 RAG 모델 갱신 실패: {e}")
 
         return result
 
