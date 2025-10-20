@@ -31,7 +31,8 @@ class RagIntegratedOllamaAnalyzer:
                  ollama_url: str = "http://localhost:11434",
                  # 모델변경(★★)
                  model_name: str = "llama3:8b-instruct-q4_K_M",
-                 timeout: int = 180):
+                 timeout: int = 180,
+                 rag_models_dir: str = "models"):
         """
         RAG 통합 Ollama 분석기 초기화
 
