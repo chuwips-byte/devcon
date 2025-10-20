@@ -15,6 +15,8 @@ from collections import defaultdict, deque
 import os
 import psutil
 import paramiko
+import glob
+from typing import Optional, Dict
 
 # 🔥 clustering_monitor에서 LogClusteringHandler import
 try:
@@ -167,16 +169,144 @@ class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else File
         else:
             module_status['ai_analyzer']['status'] = 'unavailable'
 
+        # 🔥 RAG 모델 자동 로딩 추가
+        self.rag_trainer = None
+        self.rag_available = False
+        self.load_latest_rag_model()
+
         print("✅ 웹 대시보드 핸들러 초기화 완료")
 
-    def reload_ai_rag_model(self):
-        """RAG 학습 완료 후 AI 분석기 모델 갱신"""
-        if hasattr(self, 'ollama_analyzer') and self.ollama_analyzer:
-            try:
-                self.ollama_analyzer.reload_rag_model()
-                print("✅ AI 분석기 RAG 모델 갱신 완료")
-            except Exception as e:
-                print(f"❌ AI 분석기 RAG 모델 갱신 실패: {e}")
+    def load_latest_rag_model(self):
+        """가장 최신 RAG 모델 자동 로드"""
+        try:
+            model_dirs = glob.glob("models/bug_rag_model_*")
+            if not model_dirs:
+                print("⚠️ 학습된 RAG 모델이 없습니다. AI 분석만 사용됩니다.")
+                return
+            
+            # 가장 최신 모델 선택 (디렉토리명 기준)
+            latest_model = sorted(model_dirs)[-1]
+            
+            print(f"🔄 RAG 모델 로드 시도: {latest_model}")
+            if not RAG_TRAINER_AVAILABLE:
+                print("⚠️ RAG Trainer 모듈이 없어서 모델을 로드할 수 없습니다.")
+                return
+                
+            self.rag_trainer = RAGTrainer()
+            self.rag_trainer.load_model(latest_model)
+            self.rag_available = True
+            
+            stats = self.rag_trainer.get_stats()
+            print(f"✅ RAG 모델 로드 완료: {stats['num_documents']}개 문서")
+            
+        except Exception as e:
+            print(f"⚠️ RAG 모델 로드 실패: {e}")
+            self.rag_available = False
+
+    def search_rag_knowledge(self, error_log: str, template: str, top_k: int = 3, 
+                            similarity_threshold: float = 0.6) -> Optional[Dict]:
+        """
+        RAG 지식베이스에서 유사한 에러 검색
+        
+        Args:
+            error_log: 에러 로그 원문
+            template: Drain3로 추출한 템플릿
+            top_k: 상위 몇 개 결과 반환
+            similarity_threshold: 유사도 임계값 (0.0 ~ 1.0)
+        
+        Returns:
+            유사한 이슈가 있으면 결과 딕셔너리, 없으면 None
+        """
+        if not self.rag_available or not self.rag_trainer:
+            return None
+        
+        try:
+            # 템플릿과 원문을 결합하여 검색 쿼리 생성
+            query = f"{template}\n{error_log}"
+            
+            print(f"🔍 RAG 지식베이스 검색 중...")
+            results = self.rag_trainer.search(query, top_k=top_k)
+            
+            # 유사도가 임계값 이상인 결과만 필터링
+            filtered_results = [r for r in results if r['similarity'] >= similarity_threshold]
+            
+            if not filtered_results:
+                print(f"   ❌ 유사도 {similarity_threshold} 이상인 결과 없음")
+                return None
+            
+            best_match = filtered_results[0]
+            print(f"   ✅ 유사 이슈 발견: {best_match['document'].get('id')} "
+                  f"(유사도: {best_match['similarity']:.3f})")
+            
+            # RAG 검색 결과를 AI 분석 포맷으로 변환
+            doc = best_match['document']
+            metadata = doc.get('metadata', {})
+            
+            rag_result = {
+                'source': 'RAG',  # 🔥 RAG 검색 결과임을 표시
+                'issue_key': doc.get('id', 'Unknown'),
+                'similarity': best_match['similarity'],
+                'error_type': metadata.get('summary', 'Unknown Error'),
+                'severity': metadata.get('priority', 'Medium'),
+                'root_cause': doc.get('text', '')[:200],  # 설명 일부
+                'status': metadata.get('status', 'Unknown'),
+                'labels': metadata.get('labels', []),
+                'immediate_actions': [
+                    f"유사 이슈 참고: {doc.get('id')}",
+                    f"우선순위: {metadata.get('priority', 'Unknown')}",
+                    "Jira에서 해결 방법 확인"
+                ],
+                'confidence': int(best_match['similarity'] * 100),
+                'related_issues': [
+                    {
+                        'issue_key': r['document'].get('id'),
+                        'similarity': r['similarity'],
+                        'summary': r['document'].get('metadata', {}).get('summary', '')
+                    }
+                    for r in filtered_results[:3]
+                ]
+            }
+            
+            return rag_result
+            
+        except Exception as e:
+            print(f"❌ RAG 검색 실패: {e}")
+            return None
+
+    def send_rag_alert(self, cluster_id, cluster, error_log, template, rag_result):
+        """RAG 검색 결과로 Slack 알림 전송"""
+        try:
+            if not self.slack_notifier or not self.slack_notifier.enabled:
+                return
+                
+            examples = [{'text': error_log, 'timestamp': datetime.now().isoformat()}]
+            
+            # RAG 결과를 포함한 특별한 알림 메시지
+            message = f"""
+🔍 *RAG 지식베이스 매칭*
+
+*유사 이슈:* {rag_result['issue_key']} (유사도: {rag_result['similarity']:.1%})
+*에러 타입:* {rag_result['error_type']}
+*상태:* {rag_result['status']}
+*우선순위:* {rag_result['severity']}
+
+*관련 이슈들:*
+{chr(10).join([f"  • {ri['issue_key']} (유사도: {ri['similarity']:.1%})" for ri in rag_result.get('related_issues', [])])}
+"""
+            
+            # Slack 메시지 전송
+            if hasattr(self.slack_notifier, 'send_message'):
+                self.slack_notifier.send_message(
+                    text=f"RAG 매칭 알림: {template[:100]}",
+                    blocks=[{
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": message}
+                    }]
+                )
+            print("✅ Slack RAG 알림 전송 완료")
+            
+        except Exception as e:
+            print(f"⚠️ Slack 알림 실패: {e}")
 
     def process_new_logs(self, file_path):
         """새로운 로그 라인 처리 - 부모 메서드 오버라이드"""
@@ -303,16 +433,54 @@ class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else File
             cluster_size = cluster['count']
             print(f"📊 발생 횟수: {cluster_size}번")
 
-            # [호출] 빈발(>=3) 시 알림/AI 분석 트리거
+            # 🔥 빈발(>=3) 시 RAG → AI 순서로 처리
             if cluster_size >= 3:
                 print(f"⚠️  빈발 패턴 감지! {cluster_size}번 발생")
-                # [호출] AI 분석 (가능 시)
-                if self.ollama_analyzer and self.ollama_analyzer.enabled:
-                    print("🤖 AI 분석기 활성화됨 - AI 분석 시작")
-                    self.perform_ai_analysis_for_web(cluster_id, cluster, error_line, template)
+                
+                # 🔥 1단계: RAG 지식베이스 검색
+                rag_result = self.search_rag_knowledge(error_line, template)
+                
+                if rag_result:
+                    # ✅ RAG에서 유사 이슈 발견
+                    print("✅ RAG 지식베이스에서 유사 이슈 발견 - AI 분석 생략")
+                    cluster['ai_analysis'] = rag_result
+                    
+                    # 대시보드에 기록
+                    dashboard_data['ai_analyses'].append({
+                        'cluster_id': cluster_id,
+                        'template': template,
+                        'analysis': rag_result,
+                        'timestamp': datetime.now().isoformat(),
+                        'source': 'RAG'  # 🔥 출처 표시
+                    })
+                    module_status['ai_analyzer']['last_analysis'] = datetime.now().isoformat()
+                    
+                    # Slack 알림 (RAG 결과 포함)
+                    self.send_rag_alert(cluster_id, cluster, error_line, template, rag_result)
+                    
+                    # [호출] 웹으로 AI 완료 이벤트 푸시 (RAG 결과)
+                    try:
+                        socketio.emit('ai_analysis_complete', {
+                            'cluster_id': cluster_id,
+                            'template': template,
+                            'analysis': rag_result,
+                            'timestamp': datetime.now().isoformat(),
+                            'source': 'RAG'
+                        })
+                        print("✅ RAG 분석 결과 웹 대시보드로 전송 완료")
+                    except Exception as e:
+                        print(f"Socket 전송 오류: {e}")
+                    
                 else:
-                    print("💬 AI 분석기 비활성화 - 기본 알림만 전송")
-                    self.alert_frequent_error(error_line, template, cluster_size, cluster_id)
+                    # ❌ RAG에서 유사 이슈 없음 → AI 분석 수행
+                    print("💬 RAG 지식베이스에 유사 이슈 없음 - AI 분석 시작")
+                    
+                    if self.ollama_analyzer and self.ollama_analyzer.enabled:
+                        print("🤖 AI 분석기 활성화됨 - AI 분석 시작")
+                        self.perform_ai_analysis_for_web(cluster_id, cluster, error_line, template)
+                    else:
+                        print("💬 AI 분석기 비활성화 - 기본 알림만 전송")
+                        self.alert_frequent_error(error_line, template, cluster_size, cluster_id)
 
             # [호출] 클러스터 업데이트를 웹으로 푸시
             try:
@@ -589,13 +757,14 @@ def rag_learning_process(model_name='sentence-transformers/all-MiniLM-L6-v2', ma
         # [호출] 프런트에 최종 결과 전송
         socketio.emit('rag_complete', result)
 
-        # 🔥 학습 완료 후 AI 분석기 RAG 모델 갱신
-        if 'web_handler' in globals() and hasattr(web_handler, 'reload_ai_rag_model'):
-            try:
-                web_handler.reload_ai_rag_model()
-                print("✅ 웹 대시보드 AI 분석기 RAG 모델 갱신 완료")
-            except Exception as e:
-                print(f"⚠️ 웹 대시보드 AI 분석기 RAG 모델 갱신 실패: {e}")
+        # 🔥 학습 완료 후 웹 핸들러에 새 모델 로드
+        if 'web_handler' in globals() and hasattr(web_handler, 'load_latest_rag_model'):
+            print("🔄 웹 핸들러에 새 RAG 모델 로드 중...")
+            web_handler.load_latest_rag_model()
+
+        # [호출] 상태 업데이트
+        module_status['rag_learning']['status'] = 'completed'
+        module_status['rag_learning']['process'] = None
 
         return result
 
@@ -2005,33 +2174,65 @@ def create_templates():
                         return;
                     }
                     
-                    container.innerHTML = data.map(cluster => `
-                        <div class="cluster-item severity-${getSeverityClass(cluster.severity)}">
-                            <div class="cluster-count">${cluster.count}회 발생</div>
-                            <div class="cluster-template">${cluster.template}</div>
-                            <div style="font-size: 0.8em; color: #666; margin-top: 5px;">
-                                마지막: ${new Date(cluster.last_seen).toLocaleString()}
-                            </div>
-                            ${cluster.ai_analysis ? `
-                                <div style="margin-top: 10px; padding: 10px; background: #f0f8ff; border-radius: 5px; border-left: 3px solid #007bff;">
-                                    <div style="font-weight: bold; color: #007bff; margin-bottom: 5px;">
-                                        🤖 AI 분석 결과 (신뢰도: ${cluster.ai_analysis.confidence}%)
-                                    </div>
-                                    <div style="font-size: 0.85em;">
-                                        <div><strong>에러 유형:</strong> ${cluster.ai_analysis.error_type}</div>
-                                        <div><strong>심각도:</strong> ${cluster.ai_analysis.severity}</div>
-                                        <div><strong>근본 원인:</strong> ${cluster.ai_analysis.root_cause}</div>
-                                        <div style="margin-top: 5px;">
-                                            <strong>즉시 조치사항:</strong>
-                                            <ul style="margin: 2px 0; padding-left: 15px;">
-                                                ${cluster.ai_analysis.immediate_actions.map(action => `<li>${action}</li>`).join('')}
-                                            </ul>
+                    container.innerHTML = data.map(cluster => {
+                        const analysis = cluster.ai_analysis;
+                        const isRAG = analysis && analysis.source === 'RAG';
+                        
+                        return `
+                            <div class="cluster-item severity-${getSeverityClass(cluster.severity)}">
+                                <div class="cluster-count">${cluster.count}회 발생</div>
+                                <div class="cluster-template">${cluster.template}</div>
+                                <div style="font-size: 0.8em; color: #666; margin-top: 5px;">
+                                    마지막: ${new Date(cluster.last_seen).toLocaleString()}
+                                </div>
+                                ${analysis ? `
+                                    <div style="margin-top: 10px; padding: 10px; background: ${isRAG ? '#f0fff4' : '#f0f8ff'}; border-radius: 5px; border-left: 3px solid ${isRAG ? '#28a745' : '#007bff'};">
+                                        <div style="font-weight: bold; color: ${isRAG ? '#28a745' : '#007bff'}; margin-bottom: 5px;">
+                                            ${isRAG ? '🔍 RAG 지식베이스 매칭' : '🤖 AI 분석 결과'} 
+                                            (신뢰도: ${analysis.confidence}%)
+                                        </div>
+                                        <div style="font-size: 0.85em;">
+                                            ${isRAG ? `
+                                                <div><strong>유사 이슈:</strong> ${analysis.issue_key} (유사도: ${(analysis.similarity * 100).toFixed(1)}%)</div>
+                                                <div><strong>에러 유형:</strong> ${analysis.error_type}</div>
+                                                <div><strong>상태:</strong> ${analysis.status}</div>
+                                                <div><strong>우선순위:</strong> ${analysis.severity}</div>
+                                                ${analysis.labels && analysis.labels.length > 0 ? `
+                                                    <div><strong>라벨:</strong> ${analysis.labels.join(', ')}</div>
+                                                ` : ''}
+                                                <div style="margin-top: 5px;">
+                                                    <strong>조치사항:</strong>
+                                                    <ul style="margin: 2px 0; padding-left: 15px;">
+                                                        ${analysis.immediate_actions.map(action => `<li>${action}</li>`).join('')}
+                                                    </ul>
+                                                </div>
+                                                ${analysis.related_issues && analysis.related_issues.length > 0 ? `
+                                                    <div style="margin-top: 5px;">
+                                                        <strong>관련 이슈:</strong>
+                                                        <ul style="margin: 2px 0; padding-left: 15px;">
+                                                            ${analysis.related_issues.map(ri => 
+                                                                `<li>${ri.issue_key} (${(ri.similarity * 100).toFixed(1)}%) - ${ri.summary || 'N/A'}</li>`
+                                                            ).join('')}
+                                                        </ul>
+                                                    </div>
+                                                ` : ''}
+                                            ` : `
+                                                <div><strong>에러 유형:</strong> ${analysis.error_type}</div>
+                                                <div><strong>심각도:</strong> ${analysis.severity}</div>
+                                                <div><strong>근본 원인:</strong> ${analysis.root_cause}</div>
+                                                <div style="margin-top: 5px;">
+                                                    <strong>즉시 조치사항:</strong>
+                                                    <ul style="margin: 2px 0; padding-left: 15px;">
+                                                        ${analysis.immediate_actions.map(action => `<li>${action}</li>`).join('')}
+                                                    </ul>
+                                                </div>
+                                            `}
                                         </div>
                                     </div>
-                                </div>
-                            ` : ''}
-                        </div>
-                    `).join('');
+                                ` : ''}
+                            </div>
+                        `;
+                    }).join('');
                 });
         }
         

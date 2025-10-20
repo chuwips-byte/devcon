@@ -29,9 +29,9 @@ class RagIntegratedOllamaAnalyzer:
 
     def __init__(self,
                  ollama_url: str = "http://localhost:11434",
-                 model_name: str = "mistral:latest",
-                 timeout: int = 180,
-                 rag_models_dir: str = "models"):
+                 # 모델변경(★★)
+                 model_name: str = "llama3:8b-instruct-q4_K_M",
+                 timeout: int = 180):
         """
         RAG 통합 Ollama 분석기 초기화
 
