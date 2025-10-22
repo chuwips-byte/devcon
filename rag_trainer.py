@@ -68,30 +68,42 @@ class RAGTrainer:
         self.dimension = None
 
     def build_vector_database(self, documents: List[Dict[str, Any]]) -> None:
-        """
-        문서 리스트로부터 벡터 데이터베이스 구축
-
-        Args:
-            documents: 문서 리스트
-                각 문서는 다음 구조:
-                {
-                    'id': 문서 ID,
-                    'text': 텍스트 내용,
-                    'type': 문서 타입,
-                    'metadata': 메타데이터
-                }
-        """
         if not documents:
             raise ValueError("문서 리스트가 비어있습니다.")
 
-        print(f"\n🔨 벡터 DB 구축 시작...")
-        print(f"   문서 수: {len(documents)}개")
+        # 문서 상태 확인을 위한 디버깅
+        print(f"\n📋 문서 상태 확인:")
+        for i, doc in enumerate(documents[:10]):  # 처음 3개만 확인
+            print(f"   문서 {i+1}: status = '{doc.get('metadata', 'N/A')}'")
+            print(f"           전체 키: {list(doc.keys())}")
 
-        # 문서 저장
-        self.documents = documents
+        # closed 상태가 아닌 문서만 필터링
+        filtered_documents = []
+        excluded_count = 0
+
+        for doc in documents:
+            # metadata 안의 status 확인
+            status = doc.get('metadata', {}).get('status', '')
+
+            if status == 'Closed':
+                excluded_count += 1
+                print(f"   제외: {doc.get('id', 'Unknown')} (status: {status})")
+            else:
+                filtered_documents.append(doc)
+
+        print(f"\n🔨 벡터 DB 구축 시작...")
+        print(f"   전체 문서 수: {len(documents)}개")
+        print(f"   학습 대상 문서 수: {len(filtered_documents)}개")
+        print(f"   제외된 문서 수: {excluded_count}개 (closed 상태)")
+
+        if not filtered_documents:
+            raise ValueError("학습 가능한 문서가 없습니다. (모든 문서가 closed 상태)")
+
+        # 필터링된 문서 저장
+        self.documents = filtered_documents
 
         # 텍스트 추출
-        texts = [doc['text'] for doc in documents]
+        texts = [doc['text'] for doc in filtered_documents]
 
         print(f"   임베딩 생성 중...")
         try:

@@ -39,14 +39,6 @@ except ImportError as e:
 # 기존 OllamaErrorAnalyzer는 더 이상 시도하지 않음 (존재하지 않으므로)
 OLLAMA_AVAILABLE = RAG_OLLAMA_AVAILABLE
 
-# 파일 상단에 추가
-try:
-    from ollama_integration import RagIntegratedOllamaAnalyzer
-    RAG_OLLAMA_AVAILABLE = True
-    print("✅ RAG 통합 Ollama 분석기 로드 성공")
-except ImportError as e:
-    RAG_OLLAMA_AVAILABLE = False
-    print(f"❌ RAG 통합 Ollama 분석기 로드 실패: {e}")
 
 # Jira 연동 import
 try:
@@ -148,6 +140,22 @@ class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else File
 
         self.watch_dir = watch_dir
 
+        # 🔥 Slack Notifier 명시적 초기화 (부모 클래스와 관계없이 항상 실행)
+        if SLACK_AVAILABLE:
+            try:
+                from slack_integration import SlackNotifier
+                self.slack_notifier = SlackNotifier()
+                if self.slack_notifier.enabled:
+                    print("✅ Slack 연동 활성화 (Webhook 설정됨)")
+                else:
+                    print("💬 Slack Webhook URL 미설정 - 콘솔 출력 모드")
+            except Exception as e:
+                print(f"⚠️ Slack 초기화 실패: {e}")
+                self.slack_notifier = None
+        else:
+            print("💬 Slack 모듈 로드 안됨 - 콘솔 출력만")
+            self.slack_notifier = None
+
         # RAG 통합 Ollama 분석기 초기화
         self.ollama_analyzer = None
         if RAG_OLLAMA_AVAILABLE:
@@ -174,6 +182,11 @@ class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else File
         self.rag_available = False
         self.load_latest_rag_model()
 
+        # 🔍 디버깅: 초기화 상태 확인
+        print(f"\n🔍 [초기화 완료] Slack Notifier: {self.slack_notifier is not None}")
+        if self.slack_notifier:
+            print(f"🔍 [초기화 완료] Slack Enabled: {self.slack_notifier.enabled}")
+
         print("✅ 웹 대시보드 핸들러 초기화 완료")
 
     def load_latest_rag_model(self):
@@ -183,65 +196,65 @@ class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else File
             if not model_dirs:
                 print("⚠️ 학습된 RAG 모델이 없습니다. AI 분석만 사용됩니다.")
                 return
-            
+
             # 가장 최신 모델 선택 (디렉토리명 기준)
             latest_model = sorted(model_dirs)[-1]
-            
+
             print(f"🔄 RAG 모델 로드 시도: {latest_model}")
             if not RAG_TRAINER_AVAILABLE:
                 print("⚠️ RAG Trainer 모듈이 없어서 모델을 로드할 수 없습니다.")
                 return
-                
+
             self.rag_trainer = RAGTrainer()
             self.rag_trainer.load_model(latest_model)
             self.rag_available = True
-            
+
             stats = self.rag_trainer.get_stats()
             print(f"✅ RAG 모델 로드 완료: {stats['num_documents']}개 문서")
-            
+
         except Exception as e:
             print(f"⚠️ RAG 모델 로드 실패: {e}")
             self.rag_available = False
 
-    def search_rag_knowledge(self, error_log: str, template: str, top_k: int = 3, 
-                            similarity_threshold: float = 0.6) -> Optional[Dict]:
+    def search_rag_knowledge(self, error_log: str, template: str, top_k: int = 3,
+                             similarity_threshold: float = 0.6) -> Optional[Dict]:
         """
         RAG 지식베이스에서 유사한 에러 검색
-        
+
         Args:
             error_log: 에러 로그 원문
             template: Drain3로 추출한 템플릿
             top_k: 상위 몇 개 결과 반환
             similarity_threshold: 유사도 임계값 (0.0 ~ 1.0)
-        
+
         Returns:
             유사한 이슈가 있으면 결과 딕셔너리, 없으면 None
         """
         if not self.rag_available or not self.rag_trainer:
             return None
-        
+
         try:
             # 템플릿과 원문을 결합하여 검색 쿼리 생성
             query = f"{template}\n{error_log}"
-            
+
             print(f"🔍 RAG 지식베이스 검색 중...")
             results = self.rag_trainer.search(query, top_k=top_k)
-            
+
             # 유사도가 임계값 이상인 결과만 필터링
             filtered_results = [r for r in results if r['similarity'] >= similarity_threshold]
-            
+
             if not filtered_results:
                 print(f"   ❌ 유사도 {similarity_threshold} 이상인 결과 없음")
                 return None
-            
+
             best_match = filtered_results[0]
             print(f"   ✅ 유사 이슈 발견: {best_match['document'].get('id')} "
                   f"(유사도: {best_match['similarity']:.3f})")
-            
+
             # RAG 검색 결과를 AI 분석 포맷으로 변환
             doc = best_match['document']
             metadata = doc.get('metadata', {})
-            
+
             rag_result = {
                 'source': 'RAG',  # 🔥 RAG 검색 결과임을 표시
                 'issue_key': doc.get('id', 'Unknown'),
@@ -266,47 +279,66 @@ class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else File
                     for r in filtered_results[:3]
                 ]
             }
-            
+
             return rag_result
-            
+
         except Exception as e:
             print(f"❌ RAG 검색 실패: {e}")
             return None
 
     def send_rag_alert(self, cluster_id, cluster, error_log, template, rag_result):
-        """RAG 검색 결과로 Slack 알림 전송"""
+        """RAG 검색 결과로 Slack 알림 전송 - 기존 메서드 활용"""
         try:
+            # 🔍 상세 콘솔 출력 (항상 실행)
+            similarity = rag_result.get('similarity', 0)
+            emoji = "✅" if similarity >= 0.9 else "⚠️" if similarity >= 0.7 else "🔍"
+
+            print(f"\n{emoji} RAG 매칭 알림")
+            print(f"📊 템플릿: {template}")
+            print(f"🔍 유사 이슈: {rag_result['issue_key']} (유사도: {similarity:.1%})")
+            print(f"📝 에러 타입: {rag_result.get('error_type', 'Unknown')}")
+            print(f"🚦 상태: {rag_result.get('status', 'Unknown')}")
+            print(f"🏷️ 우선순위: {rag_result.get('severity', 'Medium')}")
+
             if not self.slack_notifier or not self.slack_notifier.enabled:
+                print("💬 Slack 비활성화 - 콘솔 출력만")
                 return
-                
+
+            # 🔥 RAG 결과를 AI 분석 형식으로 변환
+            ai_analysis_format = {
+                'error_type': rag_result.get('error_type', 'Unknown Error'),
+                'severity': rag_result.get('severity', 'Medium'),
+                'root_cause': f"[RAG 지식베이스 매칭] 유사 이슈 발견: {rag_result.get('issue_key')}\n유사도: {similarity:.1%}\n\n{rag_result.get('root_cause', '상세 정보 없음')[:200]}",
+                'immediate_actions': rag_result.get('immediate_actions', ['유사 이슈 참고']),
+                'long_term_solutions': [
+                    f"Jira 이슈 참고: {rag_result.get('issue_key')}",
+                    f"이전 해결 방법 검토",
+                    f"상태: {rag_result.get('status', 'Unknown')}"
+                ],
+                'prevention_tips': rag_result.get('labels', []) or ['패턴 모니터링', '사전 예방 조치'],
+                'confidence': int(rag_result.get('similarity', 0) * 100),
+                'model_used': f"RAG Knowledge Base (유사도: {similarity:.1%})"
+            }
+
+            # 🔥 기존 send_error_alert_with_ai 메서드 사용 (작동 검증됨)
             examples = [{'text': error_log, 'timestamp': datetime.now().isoformat()}]
-            
-            # RAG 결과를 포함한 특별한 알림 메시지
-            message = f"""
-🔍 *RAG 지식베이스 매칭*
+            success = self.slack_notifier.send_error_alert_with_ai(
+                template=template,
+                count=cluster['count'],
+                cluster_id=cluster_id,
+                ai_analysis=ai_analysis_format,
+                examples=examples
+            )
 
-*유사 이슈:* {rag_result['issue_key']} (유사도: {rag_result['similarity']:.1%})
-*에러 타입:* {rag_result['error_type']}
-*상태:* {rag_result['status']}
-*우선순위:* {rag_result['severity']}
+            if success:
+                print("✅ RAG Slack 알림 전송 완료")
+            else:
+                print("❌ RAG Slack 알림 전송 실패")
 
-*관련 이슈들:*
-{chr(10).join([f"  • {ri['issue_key']} (유사도: {ri['similarity']:.1%})" for ri in rag_result.get('related_issues', [])])}
-"""
-            
-            # Slack 메시지 전송
-            if hasattr(self.slack_notifier, 'send_message'):
-                self.slack_notifier.send_message(
-                    text=f"RAG 매칭 알림: {template[:100]}",
-                    blocks=[{
-                        "type": "section",
-                        "text": {"type": "mrkdwn", "text": message}
-                    }]
-                )
-            print("✅ Slack RAG 알림 전송 완료")
-            
         except Exception as e:
-            print(f"⚠️ Slack 알림 실패: {e}")
+            print(f"⚠️ RAG Slack 알림 실패: {e}")
+            import traceback
+            traceback.print_exc()
 
     def process_new_logs(self, file_path):
         """새로운 로그 라인 처리 - 부모 메서드 오버라이드"""
@@ -436,15 +468,15 @@ class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else File
             # 🔥 빈발(>=3) 시 RAG → AI 순서로 처리
             if cluster_size >= 3:
                 print(f"⚠️  빈발 패턴 감지! {cluster_size}번 발생")
-                
+
                 # 🔥 1단계: RAG 지식베이스 검색
                 rag_result = self.search_rag_knowledge(error_line, template)
-                
+
                 if rag_result:
                     # ✅ RAG에서 유사 이슈 발견
                     print("✅ RAG 지식베이스에서 유사 이슈 발견 - AI 분석 생략")
                     cluster['ai_analysis'] = rag_result
-                    
+
                     # 대시보드에 기록
                     dashboard_data['ai_analyses'].append({
                         'cluster_id': cluster_id,
@@ -454,10 +486,10 @@ class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else File
                         'source': 'RAG'  # 🔥 출처 표시
                     })
                     module_status['ai_analyzer']['last_analysis'] = datetime.now().isoformat()
-                    
+
                     # Slack 알림 (RAG 결과 포함)
                     self.send_rag_alert(cluster_id, cluster, error_line, template, rag_result)
-                    
+
                     # [호출] 웹으로 AI 완료 이벤트 푸시 (RAG 결과)
                     try:
                         socketio.emit('ai_analysis_complete', {
@@ -470,11 +502,11 @@ class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else File
                         print("✅ RAG 분석 결과 웹 대시보드로 전송 완료")
                     except Exception as e:
                         print(f"Socket 전송 오류: {e}")
-                    
+
                 else:
                     # ❌ RAG에서 유사 이슈 없음 → AI 분석 수행
                     print("💬 RAG 지식베이스에 유사 이슈 없음 - AI 분석 시작")
-                    
+
                     if self.ollama_analyzer and self.ollama_analyzer.enabled:
                         print("🤖 AI 분석기 활성화됨 - AI 분석 시작")
                         self.perform_ai_analysis_for_web(cluster_id, cluster, error_line, template)
@@ -657,7 +689,8 @@ def rag_learning_process(model_name='sentence-transformers/all-MiniLM-L6-v2', ma
 
         socketio.emit('rag_progress', {'stage': 'searching', 'progress': 20, 'total': 100, 'detail': 'Bug 이슈 검색 중...'})
         # [호출] Bug 이슈 수집
-        bug_data = jira.fetch_bug_issues_for_rag(max_results=max_results)
+        fetch_count = max_results * 2
+        bug_data = jira.fetch_bug_issues_for_rag(max_results=fetch_count)
         all_issues = bug_data['issues']
         issue_keys = bug_data['issue_keys']
         labels_summary = bug_data['labels_summary']
@@ -670,8 +703,29 @@ def rag_learning_process(model_name='sentence-transformers/all-MiniLM-L6-v2', ma
 
         # [호출] RAG 문서화
         documents = []
+        excluded_count = 0
+
         for i, issue in enumerate(all_issues):
+            # 목표 개수에 도달하면 중단
+            if len(documents) >= max_results:
+                break
+
             try:
+                status = issue.fields.status.name if hasattr(issue.fields, 'status') and issue.fields.status else 'Unknown'
+
+                # Closed/Done 상태 제외
+                if status.lower() in ['closed', 'done']:
+                    excluded_count += 1
+                    print(f"   제외: {issue.key} (status: {status})")
+                    continue
+                doc_text = f"Bug ID: {issue.key}\n"
+                doc_text += f"Summary: {issue.fields.summary}\n"
+
+                status = issue.fields.status.name if hasattr(issue.fields, 'status') and issue.fields.status else 'Unknown'
+                if status.lower() == 'closed' or status.lower() == 'done':
+                    print(f"   제외: {issue.key} (status: {status})")
+                    continue
+
                 doc_text = f"Bug ID: {issue.key}\n"
                 doc_text += f"Summary: {issue.fields.summary}\n"
 
@@ -695,18 +749,18 @@ def rag_learning_process(model_name='sentence-transformers/all-MiniLM-L6-v2', ma
                         'issue_key': issue.key,
                         'summary': issue.fields.summary,
                         'priority': issue.fields.priority.name if hasattr(issue.fields, 'priority') and issue.fields.priority else 'Unknown',
-                        'status': issue.fields.status.name if hasattr(issue.fields, 'status') and issue.fields.status else 'Unknown',
+                        'status': status,  # 여기도 동일한 status 변수 사용
                         'labels': issue.fields.labels if hasattr(issue.fields, 'labels') else []
                     }
                 })
 
-                progress = 50 + (i / len(all_issues)) * 20
+                progress = 50 + (len(documents) / max_results) * 20
                 # [호출] 프런트 진행률 업데이트
                 socketio.emit('rag_progress', {
                     'stage': 'preprocessing',
                     'progress': int(progress),
                     'total': 100,
-                    'detail': f'Bug 데이터 전처리 중... ({i+1}/{len(all_issues)})'
+                    'detail': f'Bug 데이터 전처리 중... ({len(documents)}/{max_results})'
                 })
 
             except Exception as e:
@@ -736,6 +790,9 @@ def rag_learning_process(model_name='sentence-transformers/all-MiniLM-L6-v2', ma
 
         socketio.emit('rag_progress', {'stage': 'complete', 'progress': 100, 'total': 100, 'detail': '학습 완료!'})
 
+        # 실제 학습된 이슈 키만 추출
+        trained_issue_keys = [doc['id'] for doc in documents]
+
         # 상세 결과 구성
         result = {
             'success': True,
@@ -744,7 +801,7 @@ def rag_learning_process(model_name='sentence-transformers/all-MiniLM-L6-v2', ma
             'model_name': model_name,
             'bug_count': len(documents),
             'documents_processed': len(documents),
-            'issue_keys': issue_keys,
+            'issue_keys': trained_issue_keys,  # ← 실제 학습된 이슈만
             'labels_summary': labels_summary,
             'top_labels': sorted(labels_summary.items(), key=lambda x: x[1], reverse=True)[:10],
             'timestamp': datetime.now().isoformat()
@@ -2314,6 +2371,11 @@ def create_templates():
                     
                     // 버튼 상태 업데이트
                     updateButtons(data);
+                    
+                    // 🔥 RAG 상태가 'completed' 또는 'failed'로 변경되었을 때 이력 새로고침
+                    if (data.rag_learning.status === 'completed' || data.rag_learning.status === 'failed') {
+                        updateRAGHistory();
+                    }
                 });
         }
         
