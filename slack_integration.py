@@ -104,7 +104,14 @@ class SlackNotifier:
                 f"• {issue['issue_key']} (유사도: {issue['similarity']:.1%})"
                 for issue in rag_result['related_issues'][:3]
             ])
-
+        error_info = {
+            'template': template,
+            'count': cluster.get('count', 0),
+            'cluster_id': cluster_id,
+            'severity': rag_result.get('severity', 'Medium'),
+            'rag_result': rag_result,  # RAG 분석 결과 포함
+            'error_log': error_log
+        }
         attachment = {
             "color": color,
             "fields": [
@@ -183,6 +190,10 @@ class SlackNotifier:
                 "value": f"```{error_log[:200]}{'...' if len(error_log) > 200 else ''}```",
                 "short": False
             })
+
+        jira_link_field = self._create_jira_link_field(error_info)
+        if jira_link_field:
+            attachment["fields"].append(jira_link_field)
 
         message = {
             "text": f"{emoji} RAG 지식베이스에서 유사 이슈 발견! (유사도: {similarity:.1%})",
