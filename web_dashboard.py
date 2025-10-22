@@ -274,39 +274,108 @@ class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else File
             return None
 
     def send_rag_alert(self, cluster_id, cluster, error_log, template, rag_result):
-        """RAG 검색 결과로 Slack 알림 전송"""
+        """RAG 검색 결과로 Slack 알림 전송 (Attachments API 사용)"""
         try:
             if not self.slack_notifier or not self.slack_notifier.enabled:
+                print("⚠️ Slack 비활성화 - RAG 알림 전송 생략")
                 return
-                
+
             examples = [{'text': error_log, 'timestamp': datetime.now().isoformat()}]
-            
-            # RAG 결과를 포함한 특별한 알림 메시지
-            message = f"""
-🔍 *RAG 지식베이스 매칭*
+            count = getattr(cluster, 'size', 0)
 
-*유사 이슈:* {rag_result['issue_key']} (유사도: {rag_result['similarity']:.1%})
-*에러 타입:* {rag_result['error_type']}
-*상태:* {rag_result['status']}
-*우선순위:* {rag_result['severity']}
+            # Attachments API 방식으로 메시지 구성
+            fields = [
+                {
+                    "title": "🔍 RAG 지식베이스 매칭",
+                    "value": f"유사한 과거 이슈를 발견했습니다!",
+                    "short": False
+                },
+                {
+                    "title": "📊 에러 패턴",
+                    "value": f"```{template}```",
+                    "short": False
+                },
+                {
+                    "title": "🎫 유사 이슈",
+                    "value": f"{rag_result['issue_key']} (유사도: {rag_result['similarity']:.1%})",
+                    "short": True
+                },
+                {
+                    "title": "🏷️ 에러 타입",
+                    "value": rag_result['error_type'],
+                    "short": True
+                },
+                {
+                    "title": "📌 상태",
+                    "value": rag_result['status'],
+                    "short": True
+                },
+                {
+                    "title": "⚠️ 우선순위",
+                    "value": rag_result['severity'],
+                    "short": True
+                }
+            ]
 
-*관련 이슈들:*
-{chr(10).join([f"  • {ri['issue_key']} (유사도: {ri['similarity']:.1%})" for ri in rag_result.get('related_issues', [])])}
-"""
-            
-            # Slack 메시지 전송
-            if hasattr(self.slack_notifier, 'send_message'):
-                self.slack_notifier.send_message(
-                    text=f"RAG 매칭 알림: {template[:100]}",
-                    blocks=[{
-                        "type": "section",
-                        "text": {"type": "mrkdwn", "text": message}
-                    }]
-                )
-            print("✅ Slack RAG 알림 전송 완료")
-            
+            # 관련 이슈들 추가
+            if rag_result.get('related_issues'):
+                related_text = "\n".join([
+                    f"• {ri['issue_key']} (유사도: {ri['similarity']:.1%})"
+                    for ri in rag_result['related_issues'][:3]  # 최대 3개
+                ])
+                fields.append({
+                    "title": "🔗 관련 이슈들",
+                    "value": related_text,
+                    "short": False
+                })
+
+            # 원본 로그 예시 추가
+            if examples:
+                example_text = self.slack_notifier._format_log_examples(examples)
+                fields.append({
+                    "title": "📝 원본 로그 예시",
+                    "value": example_text,
+                    "short": False
+                })
+
+            # Jira 링크 추가 (기존 방식 재사용)
+            error_info = {
+                'template': template,
+                'count': count,
+                'cluster_id': cluster_id,
+                'severity': rag_result['severity'],
+                'examples': examples
+            }
+            jira_link_field = self.slack_notifier._create_jira_link_field(error_info)
+            if jira_link_field:
+                fields.append(jira_link_field)
+
+            # Attachments 메시지 전송 (기존 방식 호환)
+            message = {
+                "text": f"🔍 RAG 매칭 알림: {template[:100]}",
+                "attachments": [{
+                    "color": "#36a64f",  # 녹색 (RAG 매칭 성공)
+                    "fields": fields,
+                    "footer": "🧠 RAG 지식베이스 시스템",
+                    "ts": int(datetime.now().timestamp())
+                }]
+            }
+
+            # Webhook으로 직접 전송
+            import requests
+            response = requests.post(
+                self.slack_notifier.webhook_url,
+                json=message,
+                timeout=10
+            )
+
+            if response.status_code == 200:
+                print("✅ Slack RAG 알림 전송 완료")
+            else:
+                print(f"⚠️ Slack RAG 알림 전송 실패: HTTP {response.status_code}")
+
         except Exception as e:
-            print(f"⚠️ Slack 알림 실패: {e}")
+            print(f"⚠️ Slack RAG 알림 실패: {e}")
 
     def process_new_logs(self, file_path):
         """새로운 로그 라인 처리 - 부모 메서드 오버라이드"""

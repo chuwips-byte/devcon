@@ -12,6 +12,14 @@ import argparse
 import sys
 import os
 
+# Windows 콘솔 인코딩 설정
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except:
+        pass
+
 def main():
     parser = argparse.ArgumentParser(description='통합 로그 모니터링 시스템')
     parser.add_argument('--mode', choices=['dashboard', 'test', 'monitor', 'generate', 'jira', 'ssh', 'rag'],

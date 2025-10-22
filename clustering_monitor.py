@@ -21,7 +21,7 @@ except ImportError:
     print("Slack 연동 모듈을 찾을 수 없습니다. 콘솔 출력만 진행합니다.")
 
 try:
-    from ollama_integration import OllamaErrorAnalyzer
+    from ollama_integration import RagIntegratedOllamaAnalyzer
     OLLAMA_AVAILABLE = True
 except ImportError:
     OLLAMA_AVAILABLE = False
@@ -59,11 +59,11 @@ class LogClusteringHandler(FileSystemEventHandler):
         else:
             self.slack_notifier = None
 
-        # Ollama AI 분석기 초기화
+        # RAG 통합 Ollama AI 분석기 초기화
         if OLLAMA_AVAILABLE:
-            self.ollama_analyzer = OllamaErrorAnalyzer()
+            self.ollama_analyzer = RagIntegratedOllamaAnalyzer()
             if self.ollama_analyzer.enabled:
-                print("✅ Ollama AI 분석기 활성화됨")
+                print("✅ RAG 통합 Ollama AI 분석기 활성화됨")
             else:
                 print("⚠️ Ollama 비활성화 - 기본 분석만 진행")
         else:
