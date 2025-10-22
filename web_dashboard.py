@@ -217,7 +217,7 @@ class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else File
             self.rag_available = False
 
     def search_rag_knowledge(self, error_log: str, template: str, top_k: int = 3,
-                             similarity_threshold: float = 0.6) -> Optional[Dict]:
+                             similarity_threshold: float = 0.4) -> Optional[Dict]:
         """
         RAG 지식베이스에서 유사한 에러 검색
 
@@ -287,58 +287,25 @@ class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else File
             return None
 
     def send_rag_alert(self, cluster_id, cluster, error_log, template, rag_result):
-        """RAG 검색 결과로 Slack 알림 전송 - 기존 메서드 활용"""
+        """RAG 검색 결과로 Slack 알림 전송 - slack_integration 메서드 호출"""
         try:
-            # 🔍 상세 콘솔 출력 (항상 실행)
-            similarity = rag_result.get('similarity', 0)
-            emoji = "✅" if similarity >= 0.9 else "⚠️" if similarity >= 0.7 else "🔍"
-
-            print(f"\n{emoji} RAG 매칭 알림")
-            print(f"📊 템플릿: {template}")
-            print(f"🔍 유사 이슈: {rag_result['issue_key']} (유사도: {similarity:.1%})")
-            print(f"📝 에러 타입: {rag_result.get('error_type', 'Unknown')}")
-            print(f"🚦 상태: {rag_result.get('status', 'Unknown')}")
-            print(f"🏷️ 우선순위: {rag_result.get('severity', 'Medium')}")
-
-            if not self.slack_notifier or not self.slack_notifier.enabled:
-                print("💬 Slack 비활성화 - 콘솔 출력만")
+            if not self.slack_notifier:
+                print("⚠️ Slack Notifier 없음 - RAG 알림 전송 생략")
                 return
 
-            # 🔥 RAG 결과를 AI 분석 형식으로 변환
-            ai_analysis_format = {
-                'error_type': rag_result.get('error_type', 'Unknown Error'),
-                'severity': rag_result.get('severity', 'Medium'),
-                'root_cause': f"[RAG 지식베이스 매칭] 유사 이슈 발견: {rag_result.get('issue_key')}\n유사도: {similarity:.1%}\n\n{rag_result.get('root_cause', '상세 정보 없음')[:200]}",
-                'immediate_actions': rag_result.get('immediate_actions', ['유사 이슈 참고']),
-                'long_term_solutions': [
-                    f"Jira 이슈 참고: {rag_result.get('issue_key')}",
-                    f"이전 해결 방법 검토",
-                    f"상태: {rag_result.get('status', 'Unknown')}"
-                ],
-                'prevention_tips': rag_result.get('labels', []) or ['패턴 모니터링', '사전 예방 조치'],
-                'confidence': int(rag_result.get('similarity', 0) * 100),
-                'model_used': f"RAG Knowledge Base (유사도: {similarity:.1%})"
-            }
-
-            # 🔥 기존 send_error_alert_with_ai 메서드 사용 (작동 검증됨)
-            examples = [{'text': error_log, 'timestamp': datetime.now().isoformat()}]
-            success = self.slack_notifier.send_error_alert_with_ai(
-                template=template,
-                count=cluster['count'],
+            # 🔥 slack_integration의 send_rag_alert 메서드를 직접 호출
+            self.slack_notifier.send_rag_alert(
                 cluster_id=cluster_id,
-                ai_analysis=ai_analysis_format,
-                examples=examples
+                cluster={'count': getattr(cluster, 'size', 0)},  # cluster 객체를 dict로 변환
+                error_log=error_log,
+                template=template,
+                rag_result=rag_result
             )
 
-            if success:
-                print("✅ RAG Slack 알림 전송 완료")
-            else:
-                print("❌ RAG Slack 알림 전송 실패")
+            print("✅ Slack RAG 알림 전송 완료 (slack_integration 메서드 사용)")
 
         except Exception as e:
-            print(f"⚠️ RAG Slack 알림 실패: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"⚠️ Slack RAG 알림 실패: {e}")
 
     def process_new_logs(self, file_path):
         """새로운 로그 라인 처리 - 부모 메서드 오버라이드"""
