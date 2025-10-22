@@ -216,8 +216,63 @@ class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else File
             print(f"⚠️ RAG 모델 로드 실패: {e}")
             self.rag_available = False
 
+    def _extract_solution_from_text(self, text: str) -> Dict[str, str]:
+        """
+        Jira 이슈 텍스트에서 신고내용과 처리내용 분리 (정규식 기반)
+
+        Args:
+            text: 전체 이슈 텍스트
+
+        Returns:
+            {'오류사항': '...', '원인분석': '...', '처리내용': '...'}
+
+        지원 포맷:
+            - [처리내용], [오류사항], [원인분석]
+            - 처리내용, 오류사항, 원인분석 (대괄호 없음)
+            - ## 처리내용 (마크다운)
+        """
+        import re
+
+        오류사항 = ""
+        원인분석 = ""
+        처리내용 = ""
+
+        # 패턴 1: [처리내용] 또는 처리내용 (대괄호 선택적)
+        # (?=\n\[|$) : 다음 섹션([로 시작) 또는 문서 끝까지 매칭
+        처리내용_패턴 = r'\[?처리내용\]?[:\s]*\n(.*?)(?=\n\[|\n##|$)'
+        원인분석_패턴 = r'\[?원인분석\]?[:\s]*\n(.*?)(?=\n\[|\n##|$)'
+        오류사항_패턴 = r'\[?오류사항\]?[:\s]*\n(.*?)(?=\n\[|\n##|$)'
+
+        # 정규식 매칭
+        처리내용_match = re.search(처리내용_패턴, text, re.DOTALL | re.IGNORECASE)
+        원인분석_match = re.search(원인분석_패턴, text, re.DOTALL | re.IGNORECASE)
+        오류사항_match = re.search(오류사항_패턴, text, re.DOTALL | re.IGNORECASE)
+
+        if 처리내용_match:
+            처리내용 = 처리내용_match.group(1).strip()
+            # {code}...{code} 블록 제거 (Jira 코드 블록)
+            처리내용 = re.sub(r'\{code[^}]*\}.*?\{code\}', '', 처리내용, flags=re.DOTALL).strip()
+
+        if 원인분석_match:
+            원인분석 = 원인분석_match.group(1).strip()
+            원인분석 = re.sub(r'\{code[^}]*\}.*?\{code\}', '', 원인분석, flags=re.DOTALL).strip()
+
+        if 오류사항_match:
+            오류사항 = 오류사항_match.group(1).strip()
+            오류사항 = re.sub(r'\{code[^}]*\}.*?\{code\}', '', 오류사항, flags=re.DOTALL).strip()
+
+        # 폴백: 패턴이 없으면 전체 텍스트를 오류사항으로
+        if not any([오류사항, 원인분석, 처리내용]):
+            오류사항 = text.strip()
+
+        return {
+            '오류사항': 오류사항,
+            '원인분석': 원인분석,
+            '처리내용': 처리내용
+        }
+
     def search_rag_knowledge(self, error_log: str, template: str, top_k: int = 3,
-                             similarity_threshold: float = 0.6) -> Optional[Dict]:
+                             similarity_threshold: float = 0.45) -> Optional[Dict]:
         """
         RAG 지식베이스에서 유사한 에러 검색
 
@@ -225,7 +280,7 @@ class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else File
             error_log: 에러 로그 원문
             template: Drain3로 추출한 템플릿
             top_k: 상위 몇 개 결과 반환
-            similarity_threshold: 유사도 임계값 (0.0 ~ 1.0)
+            similarity_threshold: 유사도 임계값 (0.0 ~ 1.0, 기본값: 0.45)
 
         Returns:
             유사한 이슈가 있으면 결과 딕셔너리, 없으면 None
@@ -255,21 +310,53 @@ class WebDashboardHandler(LogClusteringHandler if CLUSTERING_AVAILABLE else File
             doc = best_match['document']
             metadata = doc.get('metadata', {})
 
+            # 🔥 텍스트에서 오류사항, 원인분석, 처리내용 분리 (정규식 기반)
+            doc_text = doc.get('text', '')
+            parsed = self._extract_solution_from_text(doc_text)
+            오류사항 = parsed['오류사항']
+            원인분석 = parsed['원인분석']
+            처리내용 = parsed['처리내용']
+
+            # 🔥 처리내용이 있으면 실제 해결책으로 사용, 없으면 기본 메시지
+            if 처리내용:
+                immediate_actions = [
+                    f"✅ 과거 해결 방법 (이슈 {doc.get('id')}):",
+                    처리내용[:300] + "..." if len(처리내용) > 300 else 처리내용,
+                    f"📋 상세 내용은 Jira {doc.get('id')} 참고"
+                ]
+                long_term_solutions = [
+                    "과거 해결 방법을 참고하여 동일하게 적용",
+                    "근본 원인 재발 방지 대책 수립",
+                    "유사 케이스 모니터링 강화"
+                ]
+            else:
+                immediate_actions = [
+                    f"⚠️ 유사 이슈 발견: {doc.get('id')}",
+                    f"우선순위: {metadata.get('priority', 'Unknown')}",
+                    "Jira에서 처리 이력 확인 필요"
+                ]
+                long_term_solutions = [
+                    "과거 이슈 처리 방법 조사",
+                    "유사 패턴 분석 및 대응책 수립"
+                ]
+
+            # 근본 원인: 원인분석이 있으면 우선 사용, 없으면 오류사항 사용
+            root_cause_text = 원인분석 if 원인분석 else 오류사항
+
             rag_result = {
                 'source': 'RAG',  # 🔥 RAG 검색 결과임을 표시
                 'issue_key': doc.get('id', 'Unknown'),
                 'similarity': best_match['similarity'],
                 'error_type': metadata.get('summary', 'Unknown Error'),
                 'severity': metadata.get('priority', 'Medium'),
-                'root_cause': doc.get('text', '')[:200],  # 설명 일부
+                'root_cause': f"[유사 이슈 분석] {root_cause_text[:200]}..." if len(root_cause_text) > 200 else f"[유사 이슈 분석] {root_cause_text}",
                 'status': metadata.get('status', 'Unknown'),
                 'labels': metadata.get('labels', []),
-                'immediate_actions': [
-                    f"유사 이슈 참고: {doc.get('id')}",
-                    f"우선순위: {metadata.get('priority', 'Unknown')}",
-                    "Jira에서 해결 방법 확인"
-                ],
+                'immediate_actions': immediate_actions,  # 🔥 실제 해결책 포함!
+                'long_term_solutions': long_term_solutions,  # 🔥 장기 해결책 추가!
+                'prevention_tips': [f"라벨: {label}" for label in metadata.get('labels', [])] or ['과거 사례 재발 방지'],
                 'confidence': int(best_match['similarity'] * 100),
+                'has_solution': bool(처리내용),  # 🔥 해결책 유무 표시
                 'related_issues': [
                     {
                         'issue_key': r['document'].get('id'),

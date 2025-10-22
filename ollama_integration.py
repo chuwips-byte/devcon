@@ -135,7 +135,7 @@ class RagIntegratedOllamaAnalyzer:
                       occurrence_count: int,
                       context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
-        에러 로그를 분석하여 원인과 해결방법 제공 (RAG 통합)
+        에러 로그를 분석하여 원인과 해결방법 제공 (RAG 통합 - 3단계 전략)
 
         Args:
             error_log: 실제 에러 로그
@@ -145,6 +145,11 @@ class RagIntegratedOllamaAnalyzer:
 
         Returns:
             분석 결과 딕셔너리
+
+        전략:
+            - 유사도 0.65+ → RAG 해결책 직접 사용 (빠르고 정확)
+            - 유사도 0.45~0.65 → Ollama + RAG 참고 (혼합 분석)
+            - 유사도 0.45 미만 → Ollama만 사용 (새로운 이슈)
         """
         if not self.enabled:
             return self._get_fallback_analysis(error_template)
@@ -159,18 +164,40 @@ class RagIntegratedOllamaAnalyzer:
             if self.rag_available:
                 similar_issues = self._search_similar_issues(error_log, error_template)
 
-            # 2. 프롬프트 생성 (RAG 결과 포함)
+            # 2. 유사도 기반 전략 선택
+            if similar_issues:
+                best_similarity = similar_issues[0]['similarity']
+                best_issue = similar_issues[0]
+
+                # 🔥 전략 1: 고유사도 (0.65+) → RAG 해결책 직접 사용
+                if best_similarity >= 0.65:
+                    logger.info(f"✅ 고유사도 매칭 ({best_similarity:.2f}) - RAG 해결책 직접 사용")
+                    return self._use_rag_solution_directly(
+                        best_issue, error_template, occurrence_count, similar_issues
+                    )
+
+                # 🔥 전략 2: 중유사도 (0.45~0.65) → Ollama + RAG 참고
+                elif best_similarity >= 0.45:
+                    logger.info(f"⚠️ 중유사도 매칭 ({best_similarity:.2f}) - Ollama + RAG 혼합 분석")
+                    # 기존 로직 계속 (프롬프트에 RAG 포함)
+                    pass
+                else:
+                    # 🔥 전략 3: 저유사도 (0.45 미만) → Ollama만 사용
+                    logger.info(f"🆕 저유사도 ({best_similarity:.2f}) - Ollama 단독 분석")
+                    similar_issues = []  # RAG 참고 제외
+
+            # 3. 프롬프트 생성 (RAG 결과 포함)
             prompt = self._create_rag_enhanced_prompt(
                 error_log, error_template, occurrence_count, context, similar_issues
             )
 
-            # 3. Ollama API 호출
+            # 4. Ollama API 호출
             analysis_result = self._call_ollama_api(prompt)
 
-            # 4. 결과 파싱 및 구조화
+            # 5. 결과 파싱 및 구조화
             structured_result = self._parse_analysis_result(analysis_result)
 
-            # 5. RAG 검색 결과 추가
+            # 6. RAG 검색 결과 추가
             if similar_issues:
                 structured_result['similar_issues'] = similar_issues
                 structured_result['rag_enhanced'] = True
@@ -190,6 +217,125 @@ class RagIntegratedOllamaAnalyzer:
             duration = (end_time - start_time).total_seconds()
             logger.error(f"❌ AI 에러 분석 실패: {error_template} (실패시간: {end_time.strftime('%H:%M:%S')}, 소요시간: {duration:.2f}초, 오류: {e})")
             return self._get_fallback_analysis(error_template)
+
+    def _use_rag_solution_directly(self,
+                                     best_issue: Dict[str, Any],
+                                     error_template: str,
+                                     occurrence_count: int,
+                                     similar_issues: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        고유사도 매칭 시 RAG 해결책을 직접 사용 (Ollama 생략)
+
+        Args:
+            best_issue: 최고 유사도 이슈
+            error_template: 에러 템플릿
+            occurrence_count: 발생 횟수
+            similar_issues: 유사 이슈 리스트
+
+        Returns:
+            RAG 기반 분석 결과
+        """
+        doc = best_issue['document']
+        metadata = doc.get('metadata', {})
+        doc_text = doc.get('text', '')
+
+        # 텍스트에서 오류사항, 원인분석, 처리내용 분리 (정규식 기반)
+        오류사항, 원인분석, 처리내용 = self._extract_solution_from_text(doc_text)
+
+        # 처리내용이 있으면 실제 해결책으로 사용
+        if 처리내용:
+            immediate_actions = [
+                f"✅ 과거 해결 방법 (이슈 {doc.get('id')}):",
+                처리내용[:300] + "..." if len(처리내용) > 300 else 처리내용,
+                f"📋 상세 내용은 Jira {doc.get('id')} 참고"
+            ]
+            long_term_solutions = [
+                "과거 해결 방법을 참고하여 동일하게 적용",
+                "근본 원인 재발 방지 대책 수립",
+                "유사 케이스 모니터링 강화"
+            ]
+            confidence = 95  # 고유사도 + 해결책 있음
+        else:
+            immediate_actions = [
+                f"⚠️ 유사 이슈 발견: {doc.get('id')}",
+                f"우선순위: {metadata.get('priority', 'Unknown')}",
+                "Jira에서 처리 이력 확인 필요"
+            ]
+            long_term_solutions = [
+                "과거 이슈 처리 방법 조사",
+                "유사 패턴 분석 및 대응책 수립"
+            ]
+            confidence = 85  # 고유사도지만 해결책 없음
+
+        # 근본 원인: 원인분석이 있으면 우선 사용, 없으면 오류사항 사용
+        root_cause_text = 원인분석 if 원인분석 else 오류사항
+
+        return {
+            "error_type": metadata.get('summary', 'Unknown Error'),
+            "severity": metadata.get('priority', 'High'),
+            "root_cause": f"[RAG 고유사도 매칭] {root_cause_text[:200]}..." if len(root_cause_text) > 200 else f"[RAG 고유사도 매칭] {root_cause_text}",
+            "immediate_actions": immediate_actions,
+            "long_term_solutions": long_term_solutions,
+            "prevention_tips": [f"라벨: {label}" for label in metadata.get('labels', [])] or ['과거 사례 재발 방지'],
+            "related_documentation": f"Jira 이슈: {doc.get('id')}",
+            "confidence": confidence,
+            "past_cases_referenced": len(similar_issues),
+            "similar_issues": similar_issues,
+            "rag_enhanced": True,
+            "analysis_method": "RAG_DIRECT",  # 🔥 RAG 직접 사용 표시
+            "analysis_timestamp": datetime.now().isoformat(),
+            "model_used": f"RAG Knowledge Base (유사도: {best_issue['similarity']:.2f})"
+        }
+
+    def _extract_solution_from_text(self, text: str) -> tuple:
+        """
+        Jira 이슈 텍스트에서 오류사항, 원인분석, 처리내용 분리 (정규식 기반)
+
+        Args:
+            text: 전체 이슈 텍스트
+
+        Returns:
+            (오류사항, 원인분석, 처리내용) 튜플
+
+        지원 포맷:
+            - [처리내용], [오류사항], [원인분석]
+            - 처리내용, 오류사항, 원인분석 (대괄호 없음)
+            - ## 처리내용 (마크다운)
+        """
+        import re
+
+        오류사항 = ""
+        원인분석 = ""
+        처리내용 = ""
+
+        # 패턴: [처리내용] 또는 처리내용 (대괄호 선택적)
+        처리내용_패턴 = r'\[?처리내용\]?[:\s]*\n(.*?)(?=\n\[|\n##|$)'
+        원인분석_패턴 = r'\[?원인분석\]?[:\s]*\n(.*?)(?=\n\[|\n##|$)'
+        오류사항_패턴 = r'\[?오류사항\]?[:\s]*\n(.*?)(?=\n\[|\n##|$)'
+
+        # 정규식 매칭
+        처리내용_match = re.search(처리내용_패턴, text, re.DOTALL | re.IGNORECASE)
+        원인분석_match = re.search(원인분석_패턴, text, re.DOTALL | re.IGNORECASE)
+        오류사항_match = re.search(오류사항_패턴, text, re.DOTALL | re.IGNORECASE)
+
+        if 처리내용_match:
+            처리내용 = 처리내용_match.group(1).strip()
+            # {code}...{code} 블록 제거 (Jira 코드 블록)
+            처리내용 = re.sub(r'\{code[^}]*\}.*?\{code\}', '', 처리내용, flags=re.DOTALL).strip()
+
+        if 원인분석_match:
+            원인분석 = 원인분석_match.group(1).strip()
+            원인분석 = re.sub(r'\{code[^}]*\}.*?\{code\}', '', 원인분석, flags=re.DOTALL).strip()
+
+        if 오류사항_match:
+            오류사항 = 오류사항_match.group(1).strip()
+            오류사항 = re.sub(r'\{code[^}]*\}.*?\{code\}', '', 오류사항, flags=re.DOTALL).strip()
+
+        # 폴백: 패턴이 없으면 전체 텍스트를 오류사항으로
+        if not any([오류사항, 원인분석, 처리내용]):
+            오류사항 = text.strip()
+
+        return 오류사항, 원인분석, 처리내용
 
     def _search_similar_issues(self, error_log: str, error_template: str, top_k: int = 3) -> List[Dict[str, Any]]:
         """RAG를 사용하여 유사한 이슈 검색 (디버깅 강화)"""
