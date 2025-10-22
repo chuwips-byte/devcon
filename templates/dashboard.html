@@ -1203,6 +1203,11 @@
                     
                     // 버튼 상태 업데이트
                     updateButtons(data);
+                    
+                    // 🔥 RAG 상태가 'completed' 또는 'failed'로 변경되었을 때 이력 새로고침
+                    if (data.rag_learning.status === 'completed' || data.rag_learning.status === 'failed') {
+                        updateRAGHistory();
+                    }
                 });
         }
         
